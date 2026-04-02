@@ -137,6 +137,27 @@
     .score-item   { animation:slide-in .35s ease both; }
     .reset-shake  { animation:reset-shake .4s ease; }
 
+    /* ── History modal ─────────────────────────────────────────── */
+    #history-modal { opacity: 0; transition: opacity .25s ease; }
+    #history-modal.modal-visible { opacity: 1; }
+    #history-sheet { transition: transform .25s cubic-bezier(.32,1,.6,1); }
+    #history-modal.modal-visible #history-sheet { transform: translateY(0) !important; }
+
+    /* Hold-to-reset progress overlay */
+    .player-area.holding::before {
+      content: '';
+      position: absolute; inset: 0;
+      border-radius: inherit;
+      background: rgba(0,0,0,0);
+      animation: hold-darken 1s linear forwards;
+      pointer-events: none;
+      z-index: 1;
+    }
+    @keyframes hold-darken {
+      0%   { background: rgba(0,0,0,0); }
+      100% { background: rgba(0,0,0,0.5); }
+    }
+
     /* ── Misc ──────────────────────────────────────────────────── */
     body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
     input[type=number]::-webkit-inner-spin-button,
@@ -200,6 +221,12 @@
           🚀 Start!
         </button>
 
+        <button id="reset-config-btn"
+          class="w-full py-2 rounded-full font-display text-sm text-gray-400
+                 border-2 border-gray-200 active:scale-95 transition-transform select-none">
+          🗑 Reset players
+        </button>
+
       </div>
     </div>
   </div>
@@ -241,6 +268,12 @@
     <!-- Bottom bar -->
     <div class="flex-none flex items-center gap-2.5 px-4 py-2
                 bg-black/50 backdrop-blur-sm safe-bot">
+      <button id="history-btn"
+        class="py-3 px-4 rounded-full font-display text-base text-white whitespace-nowrap
+               bg-gradient-to-r from-indigo-500 to-purple-600
+               shadow-lg active:scale-95 transition-transform select-none">
+        📋
+      </button>
       <button id="next-round-btn"
         class="flex-1 py-3 rounded-full font-display text-base text-white
                bg-gradient-to-r from-blue-500 to-violet-600
@@ -255,6 +288,30 @@
       </button>
     </div>
 
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       HISTORY MODAL
+  ═══════════════════════════════════════════════════════ -->
+  <div id="history-modal"
+    class="hidden fixed inset-0 z-50 flex items-end justify-center
+           bg-black/60 backdrop-blur-sm transition-opacity duration-250">
+    <div class="w-full max-w-lg bg-white rounded-t-3xl shadow-2xl
+                flex flex-col max-h-[80vh]
+                translate-y-full transition-transform duration-250"
+         id="history-sheet">
+      <!-- Handle + header -->
+      <div class="flex items-center justify-between px-5 pt-4 pb-3 border-b border-gray-100 shrink-0">
+        <span class="font-display text-2xl text-purple-800">📋 Round History</span>
+        <button id="history-close-btn"
+          class="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center
+                 font-display text-xl text-gray-500 active:scale-90 transition-transform">
+          ✕
+        </button>
+      </div>
+      <!-- Scrollable table -->
+      <div id="history-content" class="overflow-y-auto px-3 pb-6 pt-2"></div>
+    </div>
   </div>
 
 

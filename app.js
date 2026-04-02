@@ -3,14 +3,34 @@
 // ── Constants ────────────────────────────────────────────────────────────
 const PLAYER_COLORS = ['#FF6B6B','#4ECDC4','#45B7D1','#FFA07A','#C39BD3','#82E0AA','#F7DC6F','#85C1E9'];
 const STORAGE_KEY   = 'point-count-session';
+const CONFIG_KEY    = 'point-count-config';
 const MIN_PLAYERS   = 2;
 const MAX_PLAYERS   = 8;
+
+// ── Config persistence ───────────────────────────────────────────────────
+function saveConfig(players, pointsPerRound) {
+  localStorage.setItem(CONFIG_KEY, JSON.stringify({
+    count: players.length,
+    pointsPerRound,
+    players: players.map(p => ({ name: p.name, color: p.color })),
+  }));
+}
+
+function loadConfig() {
+  try {
+    const c = localStorage.getItem(CONFIG_KEY);
+    if (c) return JSON.parse(c);
+  } catch (_) {}
+  return null;
+}
+
+function clearConfig() { localStorage.removeItem(CONFIG_KEY); }
 
 // ── State ────────────────────────────────────────────────────────────────
 let state = freshState();
 
 function freshState() {
-  return { active: false, ended: false, round: 1, pointsPerRound: 10, focusedIdx: null, players: [] };
+  return { active: false, ended: false, round: 1, pointsPerRound: 10, focusedIdx: null, history: [], players: [] };
 }
 
 // ── Storage ──────────────────────────────────────────────────────────────
@@ -22,6 +42,7 @@ function loadState()  {
     if (s) {
       state = JSON.parse(s);
       if (state.focusedIdx === undefined) state.focusedIdx = null; // migrate old saves
+      if (!Array.isArray(state.history))   state.history = [];      // migrate old saves
       return true;
     }
   } catch (_) {}
@@ -40,9 +61,18 @@ function showScreen(id) {
 let setupCount = 2;
 
 function initSetup() {
+  const cfg = loadConfig();
+  setupCount = cfg ? cfg.count : 2;
+  refreshCountUI();
+  buildPlayerConfigs(cfg);
+  document.getElementById('points-per-round').value = cfg ? cfg.pointsPerRound : 10;
+}
+
+function resetConfig() {
+  clearConfig();
   setupCount = 2;
   refreshCountUI();
-  buildPlayerConfigs();
+  buildPlayerConfigs(null);
   document.getElementById('points-per-round').value = 10;
 }
 
@@ -52,21 +82,22 @@ function refreshCountUI() {
   document.querySelector('[data-dir="1"]').disabled  = setupCount >= MAX_PLAYERS;
 }
 
-function buildPlayerConfigs() {
+function buildPlayerConfigs(cfg) {
   const wrap = document.getElementById('player-configs');
   wrap.innerHTML = '';
 
   for (let i = 0; i < setupCount; i++) {
-    const color = PLAYER_COLORS[i % PLAYER_COLORS.length];
+    const savedColor = cfg && cfg.players[i] ? cfg.players[i].color : PLAYER_COLORS[i % PLAYER_COLORS.length];
+    const savedName  = cfg && cfg.players[i] ? cfg.players[i].name  : `Player ${i + 1}`;
     const row   = document.createElement('div');
     row.className = 'flex items-center gap-3 p-3 rounded-2xl border-l-4 bg-purple-50 transition-colors';
-    row.style.borderColor = color;
+    row.style.borderColor = savedColor;
 
     row.innerHTML = `
       <span class="font-display text-lg text-gray-400 min-w-[1.6rem] text-center">P${i + 1}</span>
-      <input type="color" id="color-${i}" value="${color}"
+      <input type="color" id="color-${i}" value="${savedColor}"
         class="w-10 h-10 rounded-full cursor-pointer border-0 bg-transparent p-0.5 shrink-0" />
-      <input type="text" id="name-${i}" value="Player ${i + 1}" maxlength="12"
+      <input type="text" id="name-${i}" value="${escHtml(savedName)}" maxlength="12"
         placeholder="Player ${i + 1}"
         class="flex-1 h-10 rounded-xl border-2 border-purple-100 px-3 text-gray-700
                outline-none focus:border-purple-400 bg-white transition-colors" />
@@ -88,7 +119,8 @@ function startSession() {
     roundScore: 0,
   }));
 
-  state = { active: true, ended: false, round: 1, pointsPerRound: ppr, focusedIdx: null, players };
+  state = { active: true, ended: false, round: 1, pointsPerRound: ppr, focusedIdx: null, history: [], players };
+  saveConfig(players, ppr);
   saveState();
   renderGame();
   showScreen('game-screen');
@@ -140,7 +172,14 @@ function rebuildGrid() {
     cell.style.backgroundColor = p.color;
     cell.style.color = contrastColor(p.color);
     setCellContent(cell, p);
-    cell.addEventListener('click', () => tapPlayer(i));
+
+    // Track whether a long-press just fired so the click handler can ignore it
+    let longPressFired = false;
+
+    cell.addEventListener('click', () => {
+      if (longPressFired) { longPressFired = false; return; }
+      tapPlayer(i);
+    });
 
     // 2-finger touch → subtract
     cell.addEventListener('touchstart', (e) => {
@@ -150,20 +189,47 @@ function rebuildGrid() {
       }
     }, { passive: false });
 
+    // Prevent OS context menu on long-press (iOS/Android)
+    cell.addEventListener('contextmenu', (e) => e.preventDefault());
+
     // Long-press (3 s) → reset round score to 0
-    let holdTimer = null;
+    let holdTimer      = null;
+    let holdStartPos   = null;
+    const MOVE_LIMIT   = 12; // px — allow micro-wobble without cancelling
+
     const startHold = (e) => {
-      if (e.touches && e.touches.length > 1) return; // ignore multi-touch
+      if (e.touches && e.touches.length !== 1) return; // single touch only
+      holdStartPos = e.touches
+        ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
+        : null;
+      cell.classList.add('holding');
       holdTimer = setTimeout(() => {
         holdTimer = null;
+        longPressFired = true;
+        cell.classList.remove('holding');
         resetRoundScore(i);
-      }, 3000);
+      }, 1000);
     };
-    const cancelHold = () => { clearTimeout(holdTimer); holdTimer = null; };
-    cell.addEventListener('touchstart',  startHold,  { passive: true });
+
+    const cancelHold = () => {
+      if (!holdTimer) return;
+      clearTimeout(holdTimer);
+      holdTimer = null;
+      cell.classList.remove('holding');
+    };
+
+    const cancelHoldOnMove = (e) => {
+      if (!holdTimer || !holdStartPos || !e.touches) return;
+      const dx = Math.abs(e.touches[0].clientX - holdStartPos.x);
+      const dy = Math.abs(e.touches[0].clientY - holdStartPos.y);
+      if (dx > MOVE_LIMIT || dy > MOVE_LIMIT) cancelHold();
+    };
+
+    cell.addEventListener('touchstart',  startHold,       { passive: true });
     cell.addEventListener('touchend',    cancelHold);
-    cell.addEventListener('touchmove',   cancelHold, { passive: true });
-    cell.addEventListener('touchcancel', cancelHold);
+    cell.addEventListener('touchmove',   cancelHoldOnMove, { passive: true });
+    // NOTE: intentionally no touchcancel listener — OS long-press fires touchcancel
+    // which would kill the timer before 3 s; contextmenu is prevented above instead.
     cell.addEventListener('mousedown',   startHold);
     cell.addEventListener('mouseup',     cancelHold);
     cell.addEventListener('mouseleave',  cancelHold);
@@ -321,6 +387,11 @@ function resetRoundScore(idx) {
 // ROUND MANAGEMENT
 // ══════════════════════════════════════════════════════════════════════════
 function nextRound() {
+  // Snapshot this round into history before resetting
+  state.history.push({
+    round:  state.round,
+    scores: state.players.map(p => p.roundScore),
+  });
   state.players.forEach(p => { p.totalScore += p.roundScore; p.roundScore = 0; });
   state.round++;
   state.focusedIdx = null; // clear focus for the new round
@@ -338,13 +409,88 @@ function nextRound() {
 // SESSION END
 // ══════════════════════════════════════════════════════════════════════════
 function endSession() {
-  // Fold current round scores into totals
+  // Snapshot final round if it has any score
+  if (state.players.some(p => p.roundScore !== 0)) {
+    state.history.push({
+      round:  state.round,
+      scores: state.players.map(p => p.roundScore),
+    });
+  }
   state.players.forEach(p => { p.totalScore += p.roundScore; p.roundScore = 0; });
   state.active = false;
   state.ended  = true;
   saveState();
   showResults();
   showScreen('result-screen');
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// HISTORY MODAL
+// ══════════════════════════════════════════════════════════════════════════
+function showHistory() {
+  const modal   = document.getElementById('history-modal');
+  const content = document.getElementById('history-content');
+  const players = state.players;
+
+  // Build rows: past rounds from history + current in-progress round
+  const rows = [
+    ...state.history,
+    { round: state.round, scores: players.map(p => p.roundScore), current: true },
+  ];
+
+  // Header row
+  const colW = 'min-w-[3rem] text-center px-1';
+  let html = `
+    <table class="w-full border-collapse text-sm font-[Nunito]">
+      <thead>
+        <tr class="border-b-2 border-purple-100">
+          <th class="text-left py-2 px-2 text-gray-400 font-black uppercase tracking-wider text-[10px]">Rnd</th>
+          ${players.map(p => `
+            <th class="${colW} py-2">
+              <span class="inline-block w-2.5 h-2.5 rounded-full mr-1"
+                    style="background:${p.color}"></span>
+              <span class="font-display text-xs" style="color:${p.color}">${escHtml(p.name)}</span>
+            </th>`).join('')}
+        </tr>
+      </thead>
+      <tbody>`;
+
+  rows.forEach(row => {
+    const isCurrent = row.current;
+    const rowClass  = isCurrent
+      ? 'bg-purple-50 font-black'
+      : 'border-b border-gray-100';
+    html += `<tr class="${rowClass}">
+      <td class="py-2 px-2 font-display text-purple-700">
+        ${isCurrent ? '▶' : row.round}
+      </td>`;
+    row.scores.forEach((s, idx) => {
+      const color = s > 0 ? '#10ac84' : s < 0 ? '#c0392b' : '#9ca3af';
+      html += `<td class="${colW} py-2 font-display tabular-nums" style="color:${color}">
+        ${s > 0 ? '+' : ''}${s}
+      </td>`;
+    });
+    html += `</tr>`;
+  });
+
+  // Totals row (running totals + current round scores)
+  html += `<tr class="border-t-2 border-purple-200 bg-white">
+    <td class="py-2 px-2 font-display text-[10px] uppercase tracking-wider text-gray-400">Total</td>`;
+  players.forEach(p => {
+    const t = p.totalScore + p.roundScore;
+    html += `<td class="${colW} py-2 font-display font-black tabular-nums text-purple-700">${t}</td>`;
+  });
+  html += `</tr></tbody></table>`;
+
+  content.innerHTML = html;
+  modal.classList.remove('hidden');
+  requestAnimationFrame(() => modal.classList.add('modal-visible'));
+}
+
+function closeHistory() {
+  const modal = document.getElementById('history-modal');
+  modal.classList.remove('modal-visible');
+  setTimeout(() => modal.classList.add('hidden'), 250);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -420,14 +566,27 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.addEventListener('click', () => {
       setupCount = Math.min(MAX_PLAYERS, Math.max(MIN_PLAYERS, setupCount + parseInt(btn.dataset.dir)));
       refreshCountUI();
-      buildPlayerConfigs();
+      // Preserve what the user has already typed by snapshotting current inputs
+      const currentCfg = { players: Array.from({ length: MAX_PLAYERS }, (_, i) => ({
+        name:  document.getElementById(`name-${i}`)  ? document.getElementById(`name-${i}`).value  : PLAYER_COLORS[i],
+        color: document.getElementById(`color-${i}`) ? document.getElementById(`color-${i}`).value : PLAYER_COLORS[i % PLAYER_COLORS.length],
+      })) };
+      buildPlayerConfigs(currentCfg);
     });
   });
 
   document.getElementById('start-btn').addEventListener('click', startSession);
+  document.getElementById('reset-config-btn').addEventListener('click', resetConfig);
 
   // Game: negate focused player's round score
   document.getElementById('toggle-btn').addEventListener('click', negateRoundScore);
+
+  // Game: history modal
+  document.getElementById('history-btn').addEventListener('click', showHistory);
+  document.getElementById('history-close-btn').addEventListener('click', closeHistory);
+  document.getElementById('history-modal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeHistory(); // tap backdrop to close
+  });
 
   // Game: next round
   document.getElementById('next-round-btn').addEventListener('click', nextRound);
