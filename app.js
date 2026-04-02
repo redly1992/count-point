@@ -10,7 +10,7 @@ const MAX_PLAYERS   = 8;
 let state = freshState();
 
 function freshState() {
-  return { active: false, ended: false, round: 1, pointsPerRound: 10, isAdding: true, players: [] };
+  return { active: false, ended: false, round: 1, pointsPerRound: 10, focusedIdx: null, players: [] };
 }
 
 // ── Storage ──────────────────────────────────────────────────────────────
@@ -19,7 +19,11 @@ function clearState() { localStorage.removeItem(STORAGE_KEY); state = freshState
 function loadState()  {
   try {
     const s = localStorage.getItem(STORAGE_KEY);
-    if (s) { state = JSON.parse(s); return true; }
+    if (s) {
+      state = JSON.parse(s);
+      if (state.focusedIdx === undefined) state.focusedIdx = null; // migrate old saves
+      return true;
+    }
   } catch (_) {}
   return false;
 }
@@ -84,7 +88,7 @@ function startSession() {
     roundScore: 0,
   }));
 
-  state = { active: true, ended: false, round: 1, pointsPerRound: ppr, isAdding: true, players };
+  state = { active: true, ended: false, round: 1, pointsPerRound: ppr, focusedIdx: null, players };
   saveState();
   renderGame();
   showScreen('game-screen');
@@ -95,15 +99,30 @@ function startSession() {
 // ══════════════════════════════════════════════════════════════════════════
 function renderGame() {
   document.getElementById('round-display').textContent = state.round;
-  refreshToggle();
+  updateSubtractBtn();
+  updateRoundTotal();
   rebuildGrid();
 }
 
-function refreshToggle() {
+// Update the "negate focused player" button label & enabled state
+function updateSubtractBtn() {
   const btn = document.getElementById('toggle-btn');
-  btn.classList.remove('btn-add', 'btn-subtract');
-  btn.classList.add(state.isAdding ? 'btn-add' : 'btn-subtract');
-  btn.textContent = state.isAdding ? '➕ Adding' : '➖ Subtracting';
+  if (state.focusedIdx !== null) {
+    const p = state.players[state.focusedIdx];
+    const name = p.name.length > 9 ? p.name.slice(0, 9) + '…' : p.name;
+    btn.textContent = `➖ ${name}`;
+    btn.disabled = false;
+  } else {
+    btn.textContent = '➖ Select player';
+    btn.disabled = true;
+  }
+}
+
+// Show sum of all players' current round scores in the header
+function updateRoundTotal() {
+  const total = state.players.reduce((sum, p) => sum + p.roundScore, 0);
+  const el = document.getElementById('round-total');
+  if (el) el.textContent = total > 0 ? `+${total}` : `${total}`;
 }
 
 // ── Player grid ──────────────────────────────────────────────────────────
@@ -127,6 +146,12 @@ function rebuildGrid() {
 
   // Special column spans for asymmetric layouts
   applySpecialSpans(grid.querySelectorAll('.player-area'), n);
+
+  // Restore focused cell highlight
+  if (state.focusedIdx !== null) {
+    const focusedCell = grid.querySelector(`.player-area[data-idx="${state.focusedIdx}"]`);
+    if (focusedCell) focusedCell.classList.add('focused');
+  }
 }
 
 function setCellContent(cell, player) {
@@ -171,14 +196,21 @@ function applySpecialSpans(cells, n) {
 function tapPlayer(idx) {
   if (!state.active) return;
 
-  const delta = state.isAdding ? state.pointsPerRound : -state.pointsPerRound;
-  state.players[idx].roundScore += delta;
+  // Always add on tap; the subtract button handles negation
+  state.players[idx].roundScore += state.pointsPerRound;
+  state.focusedIdx = idx;
   saveState();
 
   const cell = document.querySelector(`.player-area[data-idx="${idx}"]`);
   if (!cell) return;
 
+  // Move focus highlight
+  document.querySelectorAll('.player-area').forEach(c => c.classList.remove('focused'));
+  cell.classList.add('focused');
+
   setCellContent(cell, state.players[idx]);
+  updateSubtractBtn();
+  updateRoundTotal();
 
   // Re-trigger bounce animation
   cell.classList.remove('tapped');
@@ -187,16 +219,43 @@ function tapPlayer(idx) {
     setTimeout(() => cell.classList.remove('tapped'), 360);
   }));
 
-  // Floating score popup (appended to body so it's not clipped)
+  // Floating score popup
   const rect = cell.getBoundingClientRect();
   const f    = document.createElement('div');
   f.className    = 'float-score';
-  f.textContent  = delta > 0 ? `+${delta}` : `${delta}`;
-  f.style.color  = delta > 0 ? '#00e676' : '#ff5252';
+  f.textContent  = `+${state.pointsPerRound}`;
+  f.style.color  = '#00e676';
   f.style.left   = `${rect.left + rect.width  / 2}px`;
   f.style.top    = `${rect.top  + rect.height / 2}px`;
   document.body.appendChild(f);
   setTimeout(() => f.remove(), 950);
+}
+
+// Negate the focused player's round score (convert to minus or back to plus)
+function negateRoundScore() {
+  if (state.focusedIdx === null) return;
+
+  state.players[state.focusedIdx].roundScore *= -1;
+  saveState();
+
+  const cell = document.querySelector(`.player-area[data-idx="${state.focusedIdx}"]`);
+  if (cell) {
+    setCellContent(cell, state.players[state.focusedIdx]);
+
+    // Float animation showing the new value
+    const newScore = state.players[state.focusedIdx].roundScore;
+    const rect = cell.getBoundingClientRect();
+    const f = document.createElement('div');
+    f.className   = 'float-score';
+    f.textContent = newScore >= 0 ? `+${newScore}` : `${newScore}`;
+    f.style.color = newScore >= 0 ? '#00e676' : '#ff5252';
+    f.style.left  = `${rect.left + rect.width  / 2}px`;
+    f.style.top   = `${rect.top  + rect.height / 2}px`;
+    document.body.appendChild(f);
+    setTimeout(() => f.remove(), 950);
+  }
+
+  updateRoundTotal();
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -205,6 +264,7 @@ function tapPlayer(idx) {
 function nextRound() {
   state.players.forEach(p => { p.totalScore += p.roundScore; p.roundScore = 0; });
   state.round++;
+  state.focusedIdx = null; // clear focus for the new round
   saveState();
   renderGame();
 
@@ -307,12 +367,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('start-btn').addEventListener('click', startSession);
 
-  // Game: toggle add/subtract
-  document.getElementById('toggle-btn').addEventListener('click', () => {
-    state.isAdding = !state.isAdding;
-    saveState();
-    refreshToggle();
-  });
+  // Game: negate focused player's round score
+  document.getElementById('toggle-btn').addEventListener('click', negateRoundScore);
 
   // Game: next round
   document.getElementById('next-round-btn').addEventListener('click', nextRound);
