@@ -50,9 +50,32 @@ function loadState()  {
 }
 
 // ── Screen management ────────────────────────────────────────────────────
+// Wake Lock – keep screen on while the game is active
+let wakeLock = null;
+
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    if (wakeLock) return; // already held
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch (_) {}
+}
+
+function releaseWakeLock() {
+  if (wakeLock) { wakeLock.release(); wakeLock = null; }
+}
+
+// Re-acquire after the tab comes back into focus (wake lock is released on hide)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.active) acquireWakeLock();
+});
+
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
+  if (id === 'game-screen') acquireWakeLock();
+  else releaseWakeLock();
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -130,6 +153,13 @@ function startSession() {
 // GAME SCREEN
 // ══════════════════════════════════════════════════════════════════════════
 function renderGame() {
+  // Reset next-round button to default state (in case a confirm was pending)
+  const nextBtn = document.getElementById('next-round-btn');
+  if (nextBtn) {
+    nextBtn.textContent = '⏭ Next Round';
+    nextBtn.classList.remove('from-yellow-500','to-orange-500');
+    nextBtn.classList.add('from-blue-500','to-violet-600');
+  }
   document.getElementById('round-display').textContent = state.round;
   updateSubtractBtn();
   updateRoundTotal();
@@ -208,7 +238,7 @@ function rebuildGrid() {
         longPressFired = true;
         cell.classList.remove('holding');
         resetRoundScore(i);
-      }, 1000);
+      }, 500);
     };
 
     const cancelHold = () => {
@@ -289,7 +319,17 @@ function applySpecialSpans(cells, n) {
 function tapPlayer(idx, subtract = false) {
   if (!state.active) return;
 
-  const delta = subtract ? -state.pointsPerRound : state.pointsPerRound;
+  let delta = subtract ? -state.pointsPerRound : state.pointsPerRound;
+
+  // Auto-balance: if this is the only player still at 0 and all others are non-zero,
+  // fill the value that makes the round total exactly 0
+  if (!subtract && state.players[idx].roundScore === 0) {
+    const othersAllNonZero = state.players.every((p, i) => i === idx || p.roundScore !== 0);
+    if (othersAllNonZero && state.players.length > 1) {
+      const othersSum = state.players.reduce((s, p, i) => i === idx ? s : s + p.roundScore, 0);
+      if (othersSum !== 0) delta = -othersSum;
+    }
+  }
   state.players[idx].roundScore += delta;
   state.focusedIdx = idx;
   saveState();
@@ -588,8 +628,41 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target === e.currentTarget) closeHistory(); // tap backdrop to close
   });
 
-  // Game: next round
-  document.getElementById('next-round-btn').addEventListener('click', nextRound);
+  // Game: next round – confirm if round total ≠ 0
+  let nextPending = false;
+  let nextTimer   = null;
+  const nextBtn   = document.getElementById('next-round-btn');
+
+  nextBtn.addEventListener('click', () => {
+    const roundTotal = state.players.reduce((s, p) => s + p.roundScore, 0);
+
+    if (nextPending) {
+      clearTimeout(nextTimer);
+      nextPending = false;
+      nextBtn.textContent = '⏭ Next Round';
+      nextBtn.classList.remove('from-yellow-500','to-orange-500');
+      nextBtn.classList.add('from-blue-500','to-violet-600');
+      nextRound();
+      return;
+    }
+
+    if (roundTotal !== 0) {
+      // Ask for confirmation
+      nextPending = true;
+      const sign = roundTotal > 0 ? '+' : '';
+      nextBtn.textContent = `⚠️ Total ${sign}${roundTotal} — Sure?`;
+      nextBtn.classList.remove('from-blue-500','to-violet-600');
+      nextBtn.classList.add('from-yellow-500','to-orange-500');
+      nextTimer = setTimeout(() => {
+        nextPending = false;
+        nextBtn.textContent = '⏭ Next Round';
+        nextBtn.classList.remove('from-yellow-500','to-orange-500');
+        nextBtn.classList.add('from-blue-500','to-violet-600');
+      }, 2500);
+    } else {
+      nextRound();
+    }
+  });
 
   // Game: end session – double-tap protection to prevent accidents
   let endPending = false;
