@@ -141,6 +141,32 @@ function rebuildGrid() {
     cell.style.color = contrastColor(p.color);
     setCellContent(cell, p);
     cell.addEventListener('click', () => tapPlayer(i));
+
+    // 2-finger touch → subtract
+    cell.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        tapPlayer(i, true);
+      }
+    }, { passive: false });
+
+    // Long-press (3 s) → reset round score to 0
+    let holdTimer = null;
+    const startHold = (e) => {
+      if (e.touches && e.touches.length > 1) return; // ignore multi-touch
+      holdTimer = setTimeout(() => {
+        holdTimer = null;
+        resetRoundScore(i);
+      }, 3000);
+    };
+    const cancelHold = () => { clearTimeout(holdTimer); holdTimer = null; };
+    cell.addEventListener('touchstart',  startHold,  { passive: true });
+    cell.addEventListener('touchend',    cancelHold);
+    cell.addEventListener('touchmove',   cancelHold, { passive: true });
+    cell.addEventListener('touchcancel', cancelHold);
+    cell.addEventListener('mousedown',   startHold);
+    cell.addEventListener('mouseup',     cancelHold);
+    cell.addEventListener('mouseleave',  cancelHold);
     grid.appendChild(cell);
   });
 
@@ -193,11 +219,12 @@ function applySpecialSpans(cells, n) {
 }
 
 // ── Player tap ───────────────────────────────────────────────────────────
-function tapPlayer(idx) {
+// subtract=false → 1-finger (always add);  subtract=true → 2-finger gesture
+function tapPlayer(idx, subtract = false) {
   if (!state.active) return;
 
-  // Always add on tap; the subtract button handles negation
-  state.players[idx].roundScore += state.pointsPerRound;
+  const delta = subtract ? -state.pointsPerRound : state.pointsPerRound;
+  state.players[idx].roundScore += delta;
   state.focusedIdx = idx;
   saveState();
 
@@ -223,8 +250,8 @@ function tapPlayer(idx) {
   const rect = cell.getBoundingClientRect();
   const f    = document.createElement('div');
   f.className    = 'float-score';
-  f.textContent  = `+${state.pointsPerRound}`;
-  f.style.color  = '#00e676';
+  f.textContent  = delta > 0 ? `+${delta}` : `${delta}`;
+  f.style.color  = delta > 0 ? '#00e676' : '#ff5252';
   f.style.left   = `${rect.left + rect.width  / 2}px`;
   f.style.top    = `${rect.top  + rect.height / 2}px`;
   document.body.appendChild(f);
@@ -256,6 +283,38 @@ function negateRoundScore() {
   }
 
   updateRoundTotal();
+}
+
+// Long-press reset: zero out a player's round score
+function resetRoundScore(idx) {
+  if (!state.active) return;
+  state.players[idx].roundScore = 0;
+  state.focusedIdx = idx;
+  saveState();
+
+  const cell = document.querySelector(`.player-area[data-idx="${idx}"]`);
+  if (!cell) return;
+
+  document.querySelectorAll('.player-area').forEach(c => c.classList.remove('focused'));
+  cell.classList.add('focused');
+  setCellContent(cell, state.players[idx]);
+  updateSubtractBtn();
+  updateRoundTotal();
+
+  // "RESET" float indicator
+  const rect = cell.getBoundingClientRect();
+  const f = document.createElement('div');
+  f.className   = 'float-score';
+  f.textContent = '✕ 0';
+  f.style.color = '#ffffffcc';
+  f.style.left  = `${rect.left + rect.width  / 2}px`;
+  f.style.top   = `${rect.top  + rect.height / 2}px`;
+  document.body.appendChild(f);
+  setTimeout(() => f.remove(), 950);
+
+  // Brief shake animation on the cell
+  cell.classList.add('reset-shake');
+  setTimeout(() => cell.classList.remove('reset-shake'), 400);
 }
 
 // ══════════════════════════════════════════════════════════════════════════

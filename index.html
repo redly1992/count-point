@@ -124,10 +124,18 @@
       from { opacity:0; transform:translateY(18px); }
       to   { opacity:1; transform:translateY(0); }
     }
+    @keyframes reset-shake {
+      0%,100%{ transform:translateX(0) scale(1); }
+      20%    { transform:translateX(-6px) scale(.97); }
+      40%    { transform:translateX(6px) scale(.97); }
+      60%    { transform:translateX(-4px); }
+      80%    { transform:translateX(4px); }
+    }
 
     .trophy-anim  { display:inline-block; animation:trophy-float 1s ease-in-out infinite alternate; }
     .round-pop    { animation:round-pop .5s ease forwards; }
     .score-item   { animation:slide-in .35s ease both; }
+    .reset-shake  { animation:reset-shake .4s ease; }
 
     /* ── Misc ──────────────────────────────────────────────────── */
     body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
