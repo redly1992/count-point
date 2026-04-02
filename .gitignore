@@ -1,0 +1,40 @@
+# angular cache
+/.idea
+/.playwright-mcp
+
+# vs code cache
+/.vs
+/.vscode
+
+# NodeJS
+/node_modules
+/dist
+
+# NodeJS testing
+/npm-debug.log*
+/coverage
+/testResults
+yarn-error.log
+
+# Intelij IDE
+/.idea
+/*iml
+/src/environments/RABenvironment.ts
+
+# sonar
+reports/
+.scannerwork/
+debug.log
+
+# Copy file builder
+/copy-file-builder/dist
+/copy-file-builder/node_modules
+/src/app.provider.prod.ts
+
+# merge file builder
+/merge-file-builder/dist
+/merge-file-builder/node_modules
+/src/assets/i18n/en.json
+/src/assets/i18n/nl.json
+
+/AI/xsd/*
