@@ -4,8 +4,18 @@
 const PLAYER_COLORS = ['#FF6B6B','#4ECDC4','#45B7D1','#FFA07A','#C39BD3','#82E0AA','#F7DC6F','#85C1E9'];
 const STORAGE_KEY   = 'point-count-session';
 const CONFIG_KEY    = 'point-count-config';
+const SUPABASE_URL  = 'https://aaskpurumzrcjotaidym.supabase.co';
+const SUPABASE_KEY  = 'sb_publishable_KZxdfL1QlPxdsZ2UEwUrKg_VM_jUQaE';
+const SUPABASE_TABLE = 'game_sessions';
 const MIN_PLAYERS   = 2;
 const MAX_PLAYERS   = 8;
+
+const sb = window.supabase?.createClient ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+let syncChannel = null;
+let syncRoomId = new URLSearchParams(location.search).get('room') || '';
+let syncEnabled = false;
+let syncTimer = null;
+const appMode = new URLSearchParams(location.search).get('mode') || 'local';
 
 // ── Config persistence ───────────────────────────────────────────────────
 function saveConfig(players, pointsPerRound) {
@@ -34,7 +44,10 @@ function freshState() {
 }
 
 // ── Storage ──────────────────────────────────────────────────────────────
-function saveState()  { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+function saveState()  {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  scheduleSync();
+}
 function clearState() { localStorage.removeItem(STORAGE_KEY); state = freshState(); }
 function loadState()  {
   try {
@@ -47,6 +60,90 @@ function loadState()  {
     }
   } catch (_) {}
   return false;
+}
+
+function syncPayload() {
+  return {
+    state,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function ensureRoom() {
+  if (!syncRoomId) syncRoomId = crypto.randomUUID();
+  return syncRoomId;
+}
+
+function roomUrl() {
+  const url = new URL(location.href);
+  url.searchParams.set('room', syncRoomId);
+  url.searchParams.set('mode', 'view');
+  return url.toString();
+}
+
+function editRoomUrl() {
+  const url = new URL(location.href);
+  url.searchParams.set('room', syncRoomId);
+  url.searchParams.set('mode', 'edit');
+  return url.toString();
+}
+
+function setShareUi(enabled) {
+  document.getElementById('share-view-btn')?.toggleAttribute('disabled', !enabled);
+  document.getElementById('share-edit-btn')?.toggleAttribute('disabled', !enabled);
+}
+
+function scheduleSync() {
+  if (!sb || !syncEnabled || !syncRoomId) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => { pushSync().catch(() => {}); }, 250);
+}
+
+async function pushSync() {
+  if (!sb || !syncEnabled || !syncRoomId) return;
+  const payload = syncPayload();
+  const { error } = await sb.from(SUPABASE_TABLE).upsert({ id: syncRoomId, payload }, { onConflict: 'id' });
+  if (error) throw error;
+}
+
+async function loadRemoteRoom(roomId) {
+  if (!sb) throw new Error('Supabase not available');
+  const { data, error } = await sb.from(SUPABASE_TABLE).select('payload').eq('id', roomId).single();
+  if (error) throw error;
+  return data?.payload;
+}
+
+async function startRealtime(roomId) {
+  if (!sb) return;
+  if (syncChannel) {
+    await sb.removeChannel(syncChannel);
+    syncChannel = null;
+  }
+  syncRoomId = roomId;
+  syncEnabled = true;
+  syncChannel = sb.channel(`room:${roomId}`)
+    .on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_TABLE, filter: `id=eq.${roomId}` }, async () => {
+      if (!syncEnabled) return;
+      const payload = await loadRemoteRoom(roomId);
+      if (payload?.state) {
+        state = payload.state;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        renderGame();
+        if (state.ended) {
+          showResults();
+          showScreen('result-screen');
+        }
+      }
+    })
+    .subscribe();
+}
+
+function isViewerMode() {
+  return appMode === 'view';
+}
+
+function canEdit() {
+  return appMode !== 'view';
 }
 
 // ── Screen management ────────────────────────────────────────────────────
@@ -142,11 +239,19 @@ function startSession() {
     roundScore: 0,
   }));
 
-  state = { active: true, ended: false, round: 1, pointsPerRound: ppr, focusedIdx: null, history: [], players };
+  state = { active: true, ended: false, round: 1, pointsPerRound: ppr, focusedIdx: null, history: [], players, roomId: syncRoomId || '' };
   saveConfig(players, ppr);
   saveState();
   renderGame();
   showScreen('game-screen');
+  if (sb) {
+    ensureRoom().then(async () => {
+      state.roomId = syncRoomId;
+      await startRealtime(syncRoomId);
+      await pushSync();
+      setShareUi(true);
+    }).catch(() => {});
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -161,23 +266,9 @@ function renderGame() {
     nextBtn.classList.add('from-blue-500','to-violet-600');
   }
   document.getElementById('round-display').textContent = state.round;
-  updateSubtractBtn();
   updateRoundTotal();
+  renderLiveChart();
   rebuildGrid();
-}
-
-// Update the "negate focused player" button label & enabled state
-function updateSubtractBtn() {
-  const btn = document.getElementById('toggle-btn');
-  if (state.focusedIdx !== null) {
-    const p = state.players[state.focusedIdx];
-    const name = p.name.length > 9 ? p.name.slice(0, 9) + '…' : p.name;
-    btn.textContent = `➖ ${name}`;
-    btn.disabled = false;
-  } else {
-    btn.textContent = '➖ Select player';
-    btn.disabled = true;
-  }
 }
 
 // Show sum of all players' current round scores in the header
@@ -185,6 +276,71 @@ function updateRoundTotal() {
   const total = state.players.reduce((sum, p) => sum + p.roundScore, 0);
   const el = document.getElementById('round-total');
   if (el) el.textContent = total > 0 ? `+${total}` : `${total}`;
+}
+
+function renderLiveChart() {
+  const host = document.getElementById('live-chart');
+  const legend = document.getElementById('live-chart-legend');
+  if (!host || !state.players.length) return;
+
+  const rounds = state.history.map(r => r.scores);
+  if (state.active) rounds.push(state.players.map(p => p.roundScore));
+
+  if (!rounds.length) {
+    host.innerHTML = '<div class="h-full flex items-center justify-center text-white/45 text-sm">No chart data yet</div>';
+    return;
+  }
+
+  const roundScores = [...state.history.map(r => r.scores)];
+  if (state.active) roundScores.push(state.players.map(p => p.roundScore));
+
+  const ranked = [...state.players]
+    .map((p, idx) => ({ ...p, idx, rankScore: p.totalScore + p.roundScore }))
+    .sort((a, b) => b.rankScore - a.rankScore);
+
+  if (legend) {
+    legend.innerHTML = ranked.map((p, rankIdx) => `
+      <div class="flex items-center gap-1.5 rounded-full bg-white/10 px-2 py-1 text-white/90">
+        <span class="text-[10px] font-black">${rankIdx + 1}.</span>
+        <span class="w-2.5 h-2.5 rounded-full" style="background:${p.color}"></span>
+        <span class="text-[11px] font-black truncate max-w-[7rem]">${escHtml(p.name)}</span>
+      </div>
+    `).join('');
+  }
+
+  const width = Math.max(1, host.getBoundingClientRect().width || host.clientWidth || 0);
+  const height = 100;
+  const pad = 12;
+  const chartH = height - pad * 2;
+  const chartW = width - pad * 2;
+  const maxVal = Math.max(1, ...roundScores.flat().map(v => Math.abs(v)));
+  const xStep = roundScores.length > 0 ? chartW / roundScores.length : chartW;
+  const barW = Math.max(2, xStep * 0.18);
+  const zeroY = pad + chartH * 0.5;
+
+  const bars = state.players.map((p, idx) => {
+    const series = roundScores.map((round, roundIdx) => {
+      const value = round[idx] ?? 0;
+      const barH = Math.max(1, Math.abs(value) / maxVal * (chartH * 0.45));
+      const x = pad + roundIdx * xStep + xStep / 2 + idx * (barW + 1) - ((state.players.length - 1) * (barW + 1)) / 2;
+      const y = value >= 0 ? zeroY - barH : zeroY;
+      return `<rect x="${x}" y="${y}" width="${barW}" height="${barH}" rx="${Math.min(2, barW/2)}" fill="${p.color}" opacity="${value ? 0.9 : 0.25}" />`;
+    }).join('');
+    return series;
+  }).join('');
+
+  const gridLines = [0.25, 0.5, 0.75].map(r => {
+    const y = pad + chartH * r;
+    return `<line x1="${pad}" y1="${y}" x2="${width - pad}" y2="${y}" stroke="rgba(255,255,255,.12)" stroke-width="1" />`;
+  }).join('');
+
+  host.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" class="w-full h-full block">
+      <rect x="0" y="0" width="${width}" height="${height}" rx="12" fill="rgba(0,0,0,.12)" />
+      ${gridLines}
+      <line x1="${pad}" y1="${zeroY}" x2="${width - pad}" y2="${zeroY}" stroke="rgba(255,255,255,.22)" stroke-width="1.2" />
+      ${bars}
+    </svg>`;
 }
 
 // ── Player grid ──────────────────────────────────────────────────────────
@@ -206,9 +362,9 @@ function rebuildGrid() {
     // Track whether a long-press just fired so the click handler can ignore it
     let longPressFired = false;
 
-    cell.addEventListener('click', () => {
+    cell.addEventListener('click', (event) => {
       if (longPressFired) { longPressFired = false; return; }
-      tapPlayer(i);
+      tapPlayer(i, false, event);
     });
 
     // 2-finger touch → subtract
@@ -285,6 +441,9 @@ function setCellContent(cell, player) {
       <span class="name-display">${escHtml(player.name)}</span>
       <span class="total-display">🏆 ${player.totalScore}</span>
     </div>
+    <div class="absolute bottom-1 left-1/2 -translate-x-1/2 text-[10px] font-black tracking-[2px] uppercase opacity-75 pointer-events-none">
+      top + / bottom -
+    </div>
   `;
 }
 
@@ -315,9 +474,14 @@ function applySpecialSpans(cells, n) {
 }
 
 // ── Player tap ───────────────────────────────────────────────────────────
-// subtract=false → 1-finger (always add);  subtract=true → 2-finger gesture
-function tapPlayer(idx, subtract = false) {
-  if (!state.active) return;
+// tap above midpoint → add; below midpoint → subtract
+function tapPlayer(idx, subtract = false, event = null) {
+  if (!state.active || !canEdit()) return;
+
+  if (event && !subtract) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    subtract = event.clientY > rect.top + rect.height / 2;
+  }
 
   let delta = subtract ? -state.pointsPerRound : state.pointsPerRound;
 
@@ -337,22 +501,18 @@ function tapPlayer(idx, subtract = false) {
   const cell = document.querySelector(`.player-area[data-idx="${idx}"]`);
   if (!cell) return;
 
-  // Move focus highlight
   document.querySelectorAll('.player-area').forEach(c => c.classList.remove('focused'));
   cell.classList.add('focused');
-
   setCellContent(cell, state.players[idx]);
-  updateSubtractBtn();
   updateRoundTotal();
+  renderLiveChart();
 
-  // Re-trigger bounce animation
   cell.classList.remove('tapped');
   requestAnimationFrame(() => requestAnimationFrame(() => {
     cell.classList.add('tapped');
     setTimeout(() => cell.classList.remove('tapped'), 360);
   }));
 
-  // Floating score popup
   const rect = cell.getBoundingClientRect();
   const f    = document.createElement('div');
   f.className    = 'float-score';
@@ -364,36 +524,9 @@ function tapPlayer(idx, subtract = false) {
   setTimeout(() => f.remove(), 950);
 }
 
-// Negate the focused player's round score (convert to minus or back to plus)
-function negateRoundScore() {
-  if (state.focusedIdx === null) return;
-
-  state.players[state.focusedIdx].roundScore *= -1;
-  saveState();
-
-  const cell = document.querySelector(`.player-area[data-idx="${state.focusedIdx}"]`);
-  if (cell) {
-    setCellContent(cell, state.players[state.focusedIdx]);
-
-    // Float animation showing the new value
-    const newScore = state.players[state.focusedIdx].roundScore;
-    const rect = cell.getBoundingClientRect();
-    const f = document.createElement('div');
-    f.className   = 'float-score';
-    f.textContent = newScore >= 0 ? `+${newScore}` : `${newScore}`;
-    f.style.color = newScore >= 0 ? '#00e676' : '#ff5252';
-    f.style.left  = `${rect.left + rect.width  / 2}px`;
-    f.style.top   = `${rect.top  + rect.height / 2}px`;
-    document.body.appendChild(f);
-    setTimeout(() => f.remove(), 950);
-  }
-
-  updateRoundTotal();
-}
-
 // Long-press reset: zero out a player's round score
 function resetRoundScore(idx) {
-  if (!state.active) return;
+  if (!state.active || !canEdit()) return;
   state.players[idx].roundScore = 0;
   state.focusedIdx = idx;
   saveState();
@@ -404,8 +537,8 @@ function resetRoundScore(idx) {
   document.querySelectorAll('.player-area').forEach(c => c.classList.remove('focused'));
   cell.classList.add('focused');
   setCellContent(cell, state.players[idx]);
-  updateSubtractBtn();
   updateRoundTotal();
+  renderLiveChart();
 
   // "RESET" float indicator
   const rect = cell.getBoundingClientRect();
@@ -472,11 +605,11 @@ function showHistory() {
   const content = document.getElementById('history-content');
   const players = state.players;
 
-  // Build rows: past rounds from history + current in-progress round
-  const rows = [
-    ...state.history,
-    { round: state.round, scores: players.map(p => p.roundScore), current: true },
-  ];
+  // Build rows: past rounds plus the live round if the session is still active
+  const rows = [...state.history];
+  if (state.active) {
+    rows.push({ round: state.round, scores: players.map(p => p.roundScore), current: true });
+  }
 
   // Header row
   const colW = 'min-w-[3rem] text-center px-1';
@@ -540,6 +673,10 @@ function showResults() {
   const sorted  = [...state.players].sort((a, b) => b.totalScore - a.totalScore);
   const best    = sorted[0].totalScore;
   const winners = sorted.filter(p => p.totalScore === best);
+  const rounds = [
+    ...state.history.map(r => r.scores),
+    state.active ? state.players.map(p => p.roundScore) : [],
+  ].filter(row => row.length);
 
   const banner = document.getElementById('winner-banner');
   if (winners.length === 1) {
@@ -576,6 +713,40 @@ function showResults() {
       <span class="font-display text-xl font-bold" style="color:${p.color}">${p.totalScore} pts</span>`;
     list.appendChild(item);
   });
+
+  renderPerformanceChart(rounds);
+}
+
+function renderPerformanceChart(rounds) {
+  const chart = document.getElementById('performance-chart');
+  if (!chart) return;
+
+  const players = state.players;
+  if (!players.length || !rounds.length) {
+    chart.innerHTML = '<div class="text-sm text-gray-400">No round data yet.</div>';
+    return;
+  }
+
+  const maxAbs = Math.max(1, ...rounds.flat().map(v => Math.abs(v)));
+  chart.innerHTML = players.map((p, idx) => {
+    const cells = rounds.map((round, roundIdx) => {
+      const value = round[idx] ?? 0;
+      const alpha = Math.min(1, Math.max(0.2, Math.abs(value) / maxAbs));
+      const bg = value > 0 ? `rgba(16, 172, 132, ${alpha})` : value < 0 ? `rgba(192, 57, 43, ${alpha})` : 'rgba(156, 163, 175, .18)';
+      return `<span class="performance-cell ${value ? 'performance-cell--filled' : ''}" style="background:${bg}" title="Round ${roundIdx + 1}: ${value > 0 ? '+' : ''}${value}"></span>`;
+    }).join('');
+
+    return `
+      <div class="flex items-center gap-2">
+        <div class="w-20 shrink-0">
+          <div class="font-display text-xs leading-none truncate" style="color:${p.color}">${escHtml(p.name)}</div>
+          <div class="text-[10px] text-gray-400">${p.totalScore} pts</div>
+        </div>
+        <div class="flex-1 flex gap-1 overflow-x-auto pb-1">
+          ${cells}
+        </div>
+      </div>`;
+  }).join('');
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────
@@ -617,12 +788,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('start-btn').addEventListener('click', startSession);
   document.getElementById('reset-config-btn').addEventListener('click', resetConfig);
-
-  // Game: negate focused player's round score
-  document.getElementById('toggle-btn').addEventListener('click', negateRoundScore);
+  document.getElementById('share-view-btn').addEventListener('click', async () => {
+    if (!syncRoomId) return;
+    await navigator.clipboard.writeText(roomUrl());
+  });
+  document.getElementById('share-edit-btn').addEventListener('click', async () => {
+    if (!syncRoomId) return;
+    await navigator.clipboard.writeText(editRoomUrl());
+  });
 
   // Game: history modal
   document.getElementById('history-btn').addEventListener('click', showHistory);
+  document.getElementById('result-history-btn').addEventListener('click', showHistory);
   document.getElementById('history-close-btn').addEventListener('click', closeHistory);
   document.getElementById('history-modal').addEventListener('click', (e) => {
     if (e.target === e.currentTarget) closeHistory(); // tap backdrop to close
@@ -634,6 +811,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const nextBtn   = document.getElementById('next-round-btn');
 
   nextBtn.addEventListener('click', () => {
+    if (!canEdit()) return;
     const roundTotal = state.players.reduce((s, p) => s + p.roundScore, 0);
 
     if (nextPending) {
@@ -670,6 +848,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const endBtn   = document.getElementById('end-session-btn');
 
   endBtn.addEventListener('click', () => {
+    if (!canEdit()) return;
     if (endPending) {
       clearTimeout(endTimer);
       endPending = false;
@@ -692,16 +871,43 @@ document.addEventListener('DOMContentLoaded', () => {
     showScreen('setup-screen');
   });
 
-  // Restore persisted session or show setup
-  const restored = loadState();
-  if (restored && state.active) {
-    renderGame();
-    showScreen('game-screen');
-  } else if (restored && state.ended) {
-    showResults();
-    showScreen('result-screen');
+  if (syncRoomId && sb && (appMode === 'view' || appMode === 'edit')) {
+    loadRemoteRoom(syncRoomId).then(async payload => {
+      if (payload?.state) {
+        state = payload.state;
+        renderGame();
+        if (state.ended) {
+          showResults();
+          showScreen('result-screen');
+        } else {
+          showScreen('game-screen');
+        }
+        await startRealtime(syncRoomId);
+        setShareUi(true);
+      }
+    }).catch(() => {
+      initSetup();
+      showScreen('setup-screen');
+    });
   } else {
-    initSetup();
-    showScreen('setup-screen');
+    const restored = loadState();
+    if (restored && state.active) {
+      renderGame();
+      showScreen('game-screen');
+      setShareUi(true);
+    } else if (restored && state.ended) {
+      showResults();
+      showScreen('result-screen');
+      setShareUi(true);
+    } else {
+      initSetup();
+      showScreen('setup-screen');
+      setShareUi(false);
+    }
+  }
+
+  if (appMode === 'view') {
+    document.getElementById('share-view-btn')?.remove();
+    document.getElementById('share-edit-btn')?.remove();
   }
 });
