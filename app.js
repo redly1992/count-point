@@ -96,7 +96,7 @@ function setShareUi(enabled) {
 function scheduleSync() {
   if (!sb || !syncEnabled || !syncRoomId) return;
   clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => { pushSync().catch(() => {}); }, 250);
+  syncTimer = setTimeout(() => { pushSync().catch(() => {}); }, 3000);
 }
 
 async function pushSync() {
