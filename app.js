@@ -364,6 +364,12 @@ function rebuildGrid() {
 
     cell.addEventListener('click', (event) => {
       if (longPressFired) { longPressFired = false; return; }
+      const remainBtn = event.target.closest('.remain-btn');
+      if (remainBtn) {
+        event.stopPropagation();
+        applyRemain(i);
+        return;
+      }
       tapPlayer(i, false, event);
     });
 
@@ -430,11 +436,14 @@ function rebuildGrid() {
     const focusedCell = grid.querySelector(`.player-area[data-idx="${state.focusedIdx}"]`);
     if (focusedCell) focusedCell.classList.add('focused');
   }
+  refreshRemainButtons();
 }
 
 function setCellContent(cell, player) {
   const rs       = player.roundScore;
   const scoreStr = rs > 0 ? `+${rs}` : `${rs}`;
+  const idx = Number(cell.dataset.idx);
+  const remain = getRemainDelta(idx);
   cell.innerHTML = `
     <span class="score-display">${scoreStr}</span>
     <div class="flex flex-col items-center mt-1 gap-0.5 leading-none">
@@ -444,7 +453,44 @@ function setCellContent(cell, player) {
     <div class="absolute bottom-1 left-1/2 -translate-x-1/2 text-[10px] font-black tracking-[2px] uppercase opacity-75 pointer-events-none">
       top + / bottom -
     </div>
+    <button class="remain-btn absolute right-2 top-1/2 -translate-y-1/2 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-[1px] bg-white/90 text-purple-800 shadow-md ${remain === null ? 'hidden' : ''}">
+      Remain
+    </button>
   `;
+}
+
+function getRemainDelta(idx) {
+  if (!state.players[idx] || state.players[idx].roundScore !== 0) return null;
+  const othersAllNonZero = state.players.every((p, i) => i === idx || p.roundScore !== 0);
+  if (!othersAllNonZero || state.players.length <= 1) return null;
+  const othersSum = state.players.reduce((s, p, i) => i === idx ? s : s + p.roundScore, 0);
+  return othersSum !== 0 ? -othersSum : null;
+}
+
+function applyRemain(idx) {
+  if (!state.active || !canEdit()) return;
+  const delta = getRemainDelta(idx);
+  if (delta === null) return;
+  state.players[idx].roundScore += delta;
+  state.focusedIdx = idx;
+  saveState();
+  const cell = document.querySelector(`.player-area[data-idx="${idx}"]`);
+  if (!cell) return;
+  document.querySelectorAll('.player-area').forEach(c => c.classList.remove('focused'));
+  cell.classList.add('focused');
+  setCellContent(cell, state.players[idx]);
+  updateRoundTotal();
+  renderLiveChart();
+}
+
+function refreshRemainButtons() {
+  document.querySelectorAll('.player-area').forEach(cell => {
+    const idx = Number(cell.dataset.idx);
+    const btn = cell.querySelector('.remain-btn');
+    if (!btn) return;
+    const delta = getRemainDelta(idx);
+    btn.classList.toggle('hidden', delta === null);
+  });
 }
 
 function getGridCols(n) {
@@ -485,15 +531,6 @@ function tapPlayer(idx, subtract = false, event = null) {
 
   let delta = subtract ? -state.pointsPerRound : state.pointsPerRound;
 
-  // Auto-balance: if this is the only player still at 0 and all others are non-zero,
-  // fill the value that makes the round total exactly 0
-  if (!subtract && state.players[idx].roundScore === 0) {
-    const othersAllNonZero = state.players.every((p, i) => i === idx || p.roundScore !== 0);
-    if (othersAllNonZero && state.players.length > 1) {
-      const othersSum = state.players.reduce((s, p, i) => i === idx ? s : s + p.roundScore, 0);
-      if (othersSum !== 0) delta = -othersSum;
-    }
-  }
   state.players[idx].roundScore += delta;
   state.focusedIdx = idx;
   saveState();
@@ -504,6 +541,7 @@ function tapPlayer(idx, subtract = false, event = null) {
   document.querySelectorAll('.player-area').forEach(c => c.classList.remove('focused'));
   cell.classList.add('focused');
   setCellContent(cell, state.players[idx]);
+  refreshRemainButtons();
   updateRoundTotal();
   renderLiveChart();
 
@@ -537,6 +575,7 @@ function resetRoundScore(idx) {
   document.querySelectorAll('.player-area').forEach(c => c.classList.remove('focused'));
   cell.classList.add('focused');
   setCellContent(cell, state.players[idx]);
+  refreshRemainButtons();
   updateRoundTotal();
   renderLiveChart();
 
