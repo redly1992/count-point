@@ -1,5 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useRoomSync } from '../hooks/useRoomSync';
+import { sb } from '../lib/supabaseClient';
+import { saveMatchResult, saveBalanceHistory, upsertPlayer } from '../hooks/useGamePersistence';
+import { isoWeekKey } from '../lib/helpers';
 
 const DEFAULT_STATE = {
   active: false,
@@ -52,16 +55,18 @@ export function GameProvider({ children }) {
   }, [roomSync.loadState]);
 
   const updateState = useCallback((updater) => {
-    setState((current) => normalizeState(typeof updater === 'function' ? updater(current) : updater));
+    const next = normalizeState(typeof updater === 'function' ? updater(state) : updater);
+    setState(next);
     roomSync.saveState();
-  }, [roomSync]);
+    return next;
+  }, [roomSync, state]);
 
   const setPlayers = useCallback((players) => {
     updateState((current) => ({ ...current, players }));
   }, [updateState]);
 
   const startSession = useCallback((players, pointsPerRound = 10, roomId = '') => {
-    updateState({
+    const next = updateState({
       ...DEFAULT_STATE,
       active: true,
       ended: false,
@@ -80,10 +85,12 @@ export function GameProvider({ children }) {
       })),
       roomId,
     });
-  }, [updateState]);
+    // Push immediately (not debounced) so collaborators see the new session right away.
+    roomSync.pushSync(next).catch(() => {});
+  }, [updateState, roomSync]);
 
   const tapPlayer = useCallback((idx, subtract = false, event = null) => {
-    if (!state.active) return;
+    if (!state.active || !roomSync.canEdit) return;
     const nextPlayers = state.players.map((player, playerIdx) => {
       if (playerIdx !== idx) return player;
       const delta = subtract || (event && event.currentTarget && event.clientY > event.currentTarget.getBoundingClientRect().top + event.currentTarget.getBoundingClientRect().height / 2)
@@ -92,10 +99,10 @@ export function GameProvider({ children }) {
       return { ...player, roundScore: asNumber(player.roundScore) + delta };
     });
     updateState({ ...state, players: nextPlayers, focusedIdx: idx });
-  }, [state, updateState]);
+  }, [state, updateState, roomSync]);
 
   const applyRemain = useCallback((idx) => {
-    if (!state.active) return;
+    if (!state.active || !roomSync.canEdit) return;
     const player = state.players[idx];
     if (!player || asNumber(player.roundScore) !== 0) return;
     const others = state.players.filter((_, i) => i !== idx);
@@ -104,15 +111,16 @@ export function GameProvider({ children }) {
     if (othersSum === 0) return;
     const nextPlayers = state.players.map((p, i) => (i === idx ? { ...p, roundScore: asNumber(p.roundScore) - othersSum } : p));
     updateState({ ...state, players: nextPlayers, focusedIdx: idx });
-  }, [state, updateState]);
+  }, [state, updateState, roomSync]);
 
   const resetRoundScore = useCallback((idx) => {
-    if (!state.active) return;
+    if (!state.active || !roomSync.canEdit) return;
     const nextPlayers = state.players.map((player, playerIdx) => (playerIdx === idx ? { ...player, roundScore: 0 } : player));
     updateState({ ...state, players: nextPlayers, focusedIdx: idx });
-  }, [state, updateState]);
+  }, [state, updateState, roomSync]);
 
   const nextRound = useCallback(() => {
+    if (!roomSync.canEdit) return;
     const historyRow = { round: state.round, scores: state.players.map((p) => asNumber(p.roundScore)) };
     const nextPlayers = state.players.map((player) => ({
       ...player,
@@ -126,26 +134,69 @@ export function GameProvider({ children }) {
       players: nextPlayers,
       focusedIdx: null,
     });
-  }, [state, updateState]);
+  }, [state, updateState, roomSync]);
 
   const endSession = useCallback(() => {
+    if (!roomSync.canEdit) return;
     const history = state.players.some((p) => asNumber(p.roundScore) !== 0)
       ? [...state.history, { round: state.round, scores: state.players.map((p) => asNumber(p.roundScore)) }]
       : state.history;
     const finalTotals = state.players.map((p) => asNumber(p.totalScore) + asNumber(p.roundScore));
+    const deltas = state.players.map((p, i) => finalTotals[i] - asNumber(p.balance || 0));
     const players = state.players.map((player, idx) => ({
       ...player,
       totalScore: finalTotals[idx],
       roundScore: 0,
     }));
-    updateState({
+    const next = updateState({
       ...state,
       active: false,
       ended: true,
       history,
       players,
     });
-  }, [state, updateState]);
+
+    // Persist match result + balance history + updated player balances (mirrors original app.js endSession).
+    if (sb) {
+      const playedAt = new Date().toISOString();
+      const weekKey = isoWeekKey(new Date());
+      const result = {
+        round: state.round,
+        players: state.players.map((p, i) => ({
+          id: p.id || p.name,
+          name: p.name,
+          color: p.color,
+          delta: deltas[i],
+          total: finalTotals[i],
+        })),
+        history,
+      };
+      saveMatchResult({ id: state.roomId || crypto.randomUUID(), played_at: playedAt, week_key: weekKey, result, created_at: playedAt }).catch(() => {});
+      const historyRows = state.players.map((p, i) => ({
+        id: crypto.randomUUID(),
+        player_id: p.id || p.name,
+        match_id: state.roomId || '',
+        balance_before: asNumber(p.balance || 0),
+        delta: asNumber(deltas[i]),
+        balance_after: asNumber(p.balance || 0) + asNumber(deltas[i]),
+        note: 'match result',
+        created_at: playedAt,
+      }));
+      Promise.all([
+        saveBalanceHistory(historyRows),
+        Promise.all(state.players.map((p, i) => {
+          const balance = asNumber(p.balance || 0) + asNumber(deltas[i]);
+          return upsertPlayer({
+            ...p,
+            balance,
+            transfer_status: balance !== 0 ? 'pending' : 'transferred',
+          });
+        })),
+      ]).catch(() => {});
+    }
+    // Push immediately so viewers see the final result without waiting for the debounce.
+    roomSync.pushSync(next).catch(() => {});
+  }, [state, updateState, roomSync]);
 
   const value = useMemo(() => ({
     state,

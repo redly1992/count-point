@@ -63,11 +63,11 @@ export function useRoomSync(state, setState) {
     return data?.payload ?? null;
   }, []);
 
-  const pushSync = useCallback(async () => {
+  const pushSync = useCallback(async (overrideState) => {
     if (!sb || !roomRef.current || modeRef.current === 'view') return;
     await sb.from(SUPABASE_TABLE).upsert({
       id: roomRef.current,
-      payload: { state: stateRef.current, updatedAt: new Date().toISOString() },
+      payload: { state: overrideState ?? stateRef.current, updatedAt: new Date().toISOString() },
     }, { onConflict: 'id' });
   }, []);
 
@@ -93,7 +93,7 @@ export function useRoomSync(state, setState) {
   }, [ensureRoom, mode, roomId]);
 
   useEffect(() => {
-    if (!sb || !roomId || mode === 'local') return undefined;
+    if (!sb || !roomId) return undefined;
     let cancelled = false;
     const channel = sb.channel(`room:${roomId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_TABLE, filter: `id=eq.${roomId}` }, async () => {
@@ -109,7 +109,7 @@ export function useRoomSync(state, setState) {
       if (channelRef.current) sb.removeChannel(channelRef.current);
       channelRef.current = null;
     };
-  }, [loadRemoteRoom, mode, roomId, setState]);
+  }, [loadRemoteRoom, roomId, setState]);
 
   useEffect(() => () => {
     clearTimeout(timerRef.current);
