@@ -1,0 +1,22 @@
+version: 1
+applications:
+  - appRoot: react-app
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm ci
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        baseDirectory: dist
+        files:
+          - '**/*'
+      redirects:
+        - source: </*>
+          target: /index.html
+          status: 200
+      cache:
+        paths:
+          - node_modules/**/*

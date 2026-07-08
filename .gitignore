@@ -38,3 +38,7 @@ debug.log
 /src/assets/i18n/nl.json
 
 /AI/xsd/*
+/react-app/node_modules
+/react-app/dist
+/react-app/.env.local
+/react-app/.env
