@@ -2,39 +2,68 @@
 
 // ── Constants ────────────────────────────────────────────────────────────
 const PLAYER_COLORS = ['#FF6B6B','#4ECDC4','#45B7D1','#FFA07A','#C39BD3','#82E0AA','#F7DC6F','#85C1E9'];
-const STORAGE_KEY   = 'point-count-session';
-const CONFIG_KEY    = 'point-count-config';
 const SUPABASE_URL  = 'https://aaskpurumzrcjotaidym.supabase.co';
 const SUPABASE_KEY  = 'sb_publishable_KZxdfL1QlPxdsZ2UEwUrKg_VM_jUQaE';
 const SUPABASE_TABLE = 'game_sessions';
+const PLAYER_TABLE = 'players';
+const MATCH_TABLE = 'matches';
+const BALANCE_HISTORY_TABLE = 'player_balance_history';
+const SETTINGS_TABLE = 'app_settings';
 const MIN_PLAYERS   = 2;
 const MAX_PLAYERS   = 8;
 
 const sb = window.supabase?.createClient ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 let syncChannel = null;
+// The room id is the single anchor for the current game's persisted state.
+// It lives in the URL (?room=...) rather than in browser storage, so state
+// survives reloads without needing localStorage. If no room is present in
+// the URL, a fresh one is generated and written into the URL bar.
 let syncRoomId = new URLSearchParams(location.search).get('room') || '';
 let syncEnabled = false;
 let syncTimer = null;
 const appMode = new URLSearchParams(location.search).get('mode') || 'local';
+const playerColorTimers = new Map();
+
+// ── Settings persistence (Supabase key/value table, replaces localStorage) ─
+async function getSetting(key, fallback) {
+  if (!sb) return fallback;
+  try {
+    const { data, error } = await sb.from(SETTINGS_TABLE).select('value').eq('key', key).maybeSingle();
+    if (error || !data) return fallback;
+    return data.value ?? fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+async function setSetting(key, value) {
+  if (!sb) return;
+  await sb.from(SETTINGS_TABLE).upsert({ key, value, updated_at: new Date().toISOString() });
+}
+async function deleteSetting(key) {
+  if (!sb) return;
+  await sb.from(SETTINGS_TABLE).delete().eq('key', key);
+}
 
 // ── Config persistence ───────────────────────────────────────────────────
-function saveConfig(players, pointsPerRound) {
-  localStorage.setItem(CONFIG_KEY, JSON.stringify({
+async function saveConfig(players, pointsPerRound) {
+  await setSetting('config', {
     count: players.length,
     pointsPerRound,
-    players: players.map(p => ({ name: p.name, color: p.color })),
-  }));
+    players: players.map(p => ({ id: p.id, name: p.name, color: p.color })),
+  }).catch(() => {});
 }
 
-function loadConfig() {
-  try {
-    const c = localStorage.getItem(CONFIG_KEY);
-    if (c) return JSON.parse(c);
-  } catch (_) {}
-  return null;
+async function loadConfig() {
+  return await getSetting('config', null);
 }
 
-function clearConfig() { localStorage.removeItem(CONFIG_KEY); }
+async function clearConfig() { await deleteSetting('config').catch(() => {}); }
+async function loadSelectedPlayerIds() {
+  return await getSetting('selected_player_ids', []);
+}
+async function saveSelectedPlayerIds(ids) {
+  await setSetting('selected_player_ids', ids).catch(() => {});
+}
 
 // ── State ────────────────────────────────────────────────────────────────
 let state = freshState();
@@ -43,17 +72,23 @@ function freshState() {
   return { active: false, ended: false, round: 1, pointsPerRound: 10, focusedIdx: null, history: [], players: [] };
 }
 
-// ── Storage ──────────────────────────────────────────────────────────────
+// ── Storage (Supabase-backed, keyed by the room id in the URL) ───────────
 function saveState()  {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   scheduleSync();
 }
-function clearState() { localStorage.removeItem(STORAGE_KEY); state = freshState(); }
-function loadState()  {
+async function clearState() {
+  clearTimeout(syncTimer); // drop any pending debounced write from the previous game
+  state = freshState();
+  if (sb && syncRoomId) {
+    await sb.from(SUPABASE_TABLE).upsert({ id: syncRoomId, payload: syncPayload() }, { onConflict: 'id' }).catch(() => {});
+  }
+}
+async function loadState()  {
+  if (!sb || !syncRoomId) return false;
   try {
-    const s = localStorage.getItem(STORAGE_KEY);
-    if (s) {
-      state = JSON.parse(s);
+    const payload = await loadRemoteRoom(syncRoomId);
+    if (payload?.state) {
+      state = payload.state;
       if (state.focusedIdx === undefined) state.focusedIdx = null; // migrate old saves
       if (!Array.isArray(state.history))   state.history = [];      // migrate old saves
       return true;
@@ -62,11 +97,76 @@ function loadState()  {
   return false;
 }
 
+
 function syncPayload() {
   return {
     state,
     updatedAt: new Date().toISOString(),
   };
+}
+
+async function fetchPlayers() {
+  if (!sb) return [];
+  const { data, error } = await sb.from(PLAYER_TABLE).select('*').order('name', { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+async function upsertPlayer(player) {
+  if (!sb) return;
+  const payload = {
+    id: player.id || crypto.randomUUID(),
+    name: player.name,
+    balance: asNumber(player.balance),
+    transfer_status: player.transfer_status || 'transferred',
+    color: player.color || '#a855f7',
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = await sb.from(PLAYER_TABLE).upsert(payload);
+  if (error) throw error;
+}
+
+async function markPlayerTransferred(playerId) {
+  if (!sb) return;
+  const { error } = await sb.from(PLAYER_TABLE)
+    .update({ balance: 0, transfer_status: 'transferred', updated_at: new Date().toISOString() })
+    .eq('id', playerId);
+  if (error) throw error;
+}
+
+// Wipes match history, balance history, and resets every player's balance/status
+// while keeping their name and color intact.
+async function resetAppData() {
+  if (!sb) return;
+  const { error: delMatchesErr } = await sb.from(MATCH_TABLE).delete().not('id', 'is', null);
+  if (delMatchesErr) throw delMatchesErr;
+  const { error: delHistoryErr } = await sb.from(BALANCE_HISTORY_TABLE).delete().not('id', 'is', null);
+  if (delHistoryErr) throw delHistoryErr;
+  const { error: resetPlayersErr } = await sb.from(PLAYER_TABLE)
+    .update({ balance: 0, transfer_status: 'transferred', updated_at: new Date().toISOString() })
+    .not('id', 'is', null);
+  if (resetPlayersErr) throw resetPlayersErr;
+  await clearState();
+  await clearConfig();
+}
+
+async function fetchMatches() {
+  if (!sb) return [];
+  const { data, error } = await sb.from(MATCH_TABLE).select('*').order('played_at', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
+async function saveMatchResult(match) {
+  if (!sb) return;
+  const { error } = await sb.from(MATCH_TABLE).upsert(match);
+  if (error) throw error;
+}
+
+async function saveBalanceHistory(rows) {
+  if (!sb || !rows.length) return;
+  const { error } = await sb.from(BALANCE_HISTORY_TABLE).insert(rows);
+  if (error) throw error;
 }
 
 async function ensureRoom() {
@@ -108,7 +208,9 @@ async function pushSync() {
 
 async function loadRemoteRoom(roomId) {
   if (!sb) throw new Error('Supabase not available');
-  const { data, error } = await sb.from(SUPABASE_TABLE).select('payload').eq('id', roomId).single();
+  // maybeSingle() returns null (not an error) when the room hasn't been
+  // saved yet — normal for a freshly generated room id.
+  const { data, error } = await sb.from(SUPABASE_TABLE).select('payload').eq('id', roomId).maybeSingle();
   if (error) throw error;
   return data?.payload;
 }
@@ -127,7 +229,6 @@ async function startRealtime(roomId) {
       const payload = await loadRemoteRoom(roomId);
       if (payload?.state) {
         state = payload.state;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         renderGame();
         if (state.ended) {
           showResults();
@@ -144,6 +245,20 @@ function isViewerMode() {
 
 function canEdit() {
   return appMode !== 'view';
+}
+
+function isoWeekKey(date = new Date()) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+function asNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
 }
 
 // ── Screen management ────────────────────────────────────────────────────
@@ -178,69 +293,264 @@ function showScreen(id) {
 // ══════════════════════════════════════════════════════════════════════════
 // SETUP SCREEN
 // ══════════════════════════════════════════════════════════════════════════
-let setupCount = 2;
+let setupCount = 0;
 
-function initSetup() {
-  const cfg = loadConfig();
-  setupCount = cfg ? cfg.count : 2;
-  refreshCountUI();
-  buildPlayerConfigs(cfg);
+async function initSetup() {
+  const cfg = await loadConfig().catch(() => null);
+  const selected = await getSelectedPlayers().catch(() => []);
+  setupCount = selected.length;
+  await buildPlayerConfigs(selected.length ? { count: selected.length, pointsPerRound: cfg ? cfg.pointsPerRound : 10, players: selected } : cfg).catch(() => {});
   document.getElementById('points-per-round').value = cfg ? cfg.pointsPerRound : 10;
 }
 
-function resetConfig() {
-  clearConfig();
-  setupCount = 2;
-  refreshCountUI();
-  buildPlayerConfigs(null);
+async function resetConfig() {
+  await clearConfig();
+  setupCount = 0;
+  await buildPlayerConfigs(null);
   document.getElementById('points-per-round').value = 10;
 }
 
-function refreshCountUI() {
-  document.getElementById('player-count-display').textContent = setupCount;
-  document.querySelector('[data-dir="-1"]').disabled = setupCount <= MIN_PLAYERS;
-  document.querySelector('[data-dir="1"]').disabled  = setupCount >= MAX_PLAYERS;
+async function getSelectedPlayers() {
+  const ids = await loadSelectedPlayerIds();
+  const players = await fetchPlayers().catch(() => []);
+  return players.filter(p => ids.includes(p.id));
 }
 
-function buildPlayerConfigs(cfg) {
+async function buildPlayerConfigs(cfg) {
   const wrap = document.getElementById('player-configs');
   wrap.innerHTML = '';
-
-  for (let i = 0; i < setupCount; i++) {
-    const savedColor = cfg && cfg.players[i] ? cfg.players[i].color : PLAYER_COLORS[i % PLAYER_COLORS.length];
-    const savedName  = cfg && cfg.players[i] ? cfg.players[i].name  : `Player ${i + 1}`;
-    const row   = document.createElement('div');
+  const selectedPlayers = cfg?.players || await getSelectedPlayers().catch(() => []);
+  if (!selectedPlayers.length) {
+    wrap.innerHTML = '<div class="rounded-2xl bg-gray-50 p-4 text-sm text-gray-500">No players selected in Player Management yet.</div>';
+    return;
+  }
+  selectedPlayers.forEach((p, i) => {
+    const row = document.createElement('div');
     row.className = 'flex items-center gap-3 p-3 rounded-2xl border-l-4 bg-purple-50 transition-colors';
-    row.style.borderColor = savedColor;
-
+    row.style.borderColor = p.color || PLAYER_COLORS[i % PLAYER_COLORS.length];
     row.innerHTML = `
       <span class="font-display text-lg text-gray-400 min-w-[1.6rem] text-center">P${i + 1}</span>
-      <input type="color" id="color-${i}" value="${savedColor}"
-        class="w-10 h-10 rounded-full cursor-pointer border-0 bg-transparent p-0.5 shrink-0" />
-      <input type="text" id="name-${i}" value="${escHtml(savedName)}" maxlength="12"
-        placeholder="Player ${i + 1}"
-        class="flex-1 h-10 rounded-xl border-2 border-purple-100 px-3 text-gray-700
-               outline-none focus:border-purple-400 bg-white transition-colors" />
+      <div class="w-10 h-10 rounded-full shrink-0 border-2 border-white" style="background:${p.color || PLAYER_COLORS[i % PLAYER_COLORS.length]}"></div>
+      <div class="flex-1 min-w-0">
+        <div class="font-black text-gray-800 truncate">${escHtml(p.name)}</div>
+        <div class="text-xs text-gray-400">Selected from Player Management</div>
+      </div>
     `;
-
-    row.querySelector(`#color-${i}`).addEventListener('input', e => {
-      row.style.borderColor = e.target.value;
-    });
     wrap.appendChild(row);
-  }
+  });
 }
 
-function startSession() {
+async function renderPlayersAdmin() {
+  const host = document.getElementById('players-admin-list');
+  if (!host) return;
+  const players = await fetchPlayers().catch(() => []);
+  const selected = new Set(await loadSelectedPlayerIds());
+  const validIds = players.filter(p => selected.has(p.id)).map(p => p.id);
+  if (validIds.length !== selected.size) await saveSelectedPlayerIds(validIds);
+  const selectedSet = new Set(validIds);
+  const selectedCount = validIds.length;
+  if (!players.length) {
+    host.innerHTML = '<div class="text-gray-400 text-sm">No players yet.</div>';
+    return;
+  }
+
+  const selectedInfo = document.getElementById('selected-players-info');
+  if (selectedInfo) selectedInfo.textContent = `${selectedCount} selected`;
+
+  host.innerHTML = players.map(p => `
+    <div class="rounded-2xl border-2 p-3 flex items-center gap-3 ${selected.has(p.id) ? 'border-purple-500 bg-purple-50' : 'border-purple-100 bg-white'}">
+      <label class="flex items-center gap-2 cursor-pointer shrink-0" title="Select this player for the next match">
+        <input type="checkbox" class="player-select" data-id="${p.id}" ${selected.has(p.id) ? 'checked' : ''} />
+        <span class="text-[10px] uppercase tracking-[2px] ${selected.has(p.id) ? 'text-purple-700' : 'text-gray-400'}">Use</span>
+      </label>
+      <div class="flex-1 min-w-0">
+        <div class="font-black truncate" style="color:${p.color || '#6b21a8'}">${escHtml(p.name)}</div>
+        <div class="mt-1 flex items-center gap-2 flex-wrap">
+          <span class="inline-flex items-center px-2 py-1 rounded-full text-[10px] font-black uppercase tracking-[1px] ${p.transfer_status === 'pending' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}">
+            ${escHtml(p.transfer_status || 'transferred')}
+          </span>
+          <input type="color" class="player-color-input w-8 h-8 rounded-full border-0 bg-transparent p-0 cursor-pointer" data-id="${p.id}" value="${p.color || '#ffffff'}" title="Change player color" />
+          <span class="text-xs text-gray-500">Balance</span>
+          <span class="font-display text-2xl text-purple-800">${asNumber(p.balance)}</span>
+        </div>
+      </div>
+      <button class="px-3 py-2 rounded-full bg-green-600 text-white text-sm font-black transfer-btn" data-id="${p.id}">Transferred</button>
+    </div>
+  `).join('');
+
+  host.querySelectorAll('.player-select').forEach(cb => {
+    cb.addEventListener('change', async () => {
+      const ids = new Set(await loadSelectedPlayerIds());
+      if (cb.checked) ids.add(cb.dataset.id); else ids.delete(cb.dataset.id);
+      await saveSelectedPlayerIds([...ids]);
+      renderPlayersAdmin();
+    });
+  });
+  host.querySelectorAll('.transfer-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('div.rounded-2xl');
+      const name = row?.querySelector('.font-black')?.textContent || 'this player';
+      if (!confirm(`Mark ${name} as transferred and set balance to 0?`)) return;
+      await markPlayerTransferred(btn.dataset.id);
+      renderPlayersAdmin();
+    });
+  });
+  host.querySelectorAll('.player-color-input').forEach(input => {
+    const saveColor = (color) => {
+      clearTimeout(playerColorTimers.get(input.dataset.id));
+      playerColorTimers.set(input.dataset.id, setTimeout(async () => {
+        const players = await fetchPlayers().catch(() => []);
+        const player = players.find(p => p.id === input.dataset.id);
+        if (!player) return;
+        await upsertPlayer({ ...player, color }).catch(() => {});
+        renderPlayersAdmin();
+      }, 300));
+    };
+    input.addEventListener('input', () => {
+      const color = input.value;
+      const name = input.closest('.rounded-2xl')?.querySelector('.font-black');
+      if (name) name.style.color = color;
+      saveColor(color);
+    });
+    input.addEventListener('change', () => {
+      const color = input.value;
+      const name = input.closest('.rounded-2xl')?.querySelector('.font-black');
+      if (name) name.style.color = color;
+      saveColor(color);
+    });
+  });
+}
+
+async function renderWeeklyReport() {
+  const weeks = await fetchMatches().catch(() => []);
+  const tabs = document.getElementById('week-tabs');
+  const list = document.getElementById('week-report-list');
+  if (!tabs || !list) return;
+  const grouped = Object.values(weeks.reduce((acc, m) => {
+    const key = m.week_key || isoWeekKey(new Date(m.played_at || Date.now()));
+    (acc[key] ||= []).push(m);
+    return acc;
+  }, {}));
+  const weekKeys = [...new Set(weeks.map(m => m.week_key || isoWeekKey(new Date(m.played_at || Date.now()))))];
+  const activeWeek = weekKeys[0] || isoWeekKey();
+  tabs.innerHTML = weekKeys.map((w, i) => `<button class="week-tab px-3 py-2 rounded-full text-sm font-black ${i === 0 ? 'bg-purple-700 text-white' : 'bg-gray-100 text-gray-600'}" data-week="${w}">${w}</button>`).join('');
+  const renderWeek = (w) => {
+    const rows = weeks.filter(m => (m.week_key || isoWeekKey(new Date(m.played_at || Date.now()))) === w);
+    list.innerHTML = rows.length ? rows.map(m => `
+      <button class="text-left rounded-2xl border-2 border-purple-100 p-3" data-match-id="${m.id}">
+        <div class="flex items-center justify-between">
+          <div class="font-black text-gray-800">${new Date(m.played_at || Date.now()).toLocaleString()}</div>
+          <div class="text-xs text-gray-500">${w}</div>
+        </div>
+      </button>
+    `).join('') : '<div class="text-gray-400 text-sm">No matches in this week.</div>';
+    list.querySelectorAll('[data-match-id]').forEach(btn => btn.addEventListener('click', () => openMatchDetail(btn.dataset.matchId)));
+  };
+  renderWeek(activeWeek);
+  tabs.querySelectorAll('.week-tab').forEach(btn => btn.addEventListener('click', () => {
+    tabs.querySelectorAll('.week-tab').forEach(x => x.className = 'week-tab px-3 py-2 rounded-full text-sm font-black bg-gray-100 text-gray-600');
+    btn.className = 'week-tab px-3 py-2 rounded-full text-sm font-black bg-purple-700 text-white';
+    renderWeek(btn.dataset.week);
+  }));
+}
+
+async function openMatchDetail(matchId) {
+  const modal = document.getElementById('match-detail-modal');
+  const title = document.getElementById('match-detail-title');
+  const body = document.getElementById('match-detail-body');
+  const matches = await fetchMatches().catch(() => []);
+  const match = matches.find(m => m.id === matchId);
+  if (!match) return;
+  const result = match.result || {};
+  const players = Array.isArray(result.players) ? result.players : [];
+  const history = Array.isArray(result.history) ? result.history : [];
+  const totalPlayers = players.length;
+  const winner = [...players].sort((a, b) => asNumber(b.total) - asNumber(a.total))[0];
+
+  title.textContent = new Date(match.played_at || Date.now()).toLocaleString();
+  body.innerHTML = `
+    <div class="flex flex-col gap-4">
+      <div class="grid grid-cols-3 gap-2">
+        <div class="rounded-2xl bg-purple-50 p-3">
+          <div class="text-[10px] uppercase tracking-[2px] text-gray-400">Players</div>
+          <div class="font-display text-2xl text-purple-800">${totalPlayers}</div>
+        </div>
+        <div class="rounded-2xl bg-purple-50 p-3">
+          <div class="text-[10px] uppercase tracking-[2px] text-gray-400">Rounds</div>
+          <div class="font-display text-2xl text-purple-800">${history.length || (result.round || 0)}</div>
+        </div>
+        <div class="rounded-2xl bg-purple-50 p-3">
+          <div class="text-[10px] uppercase tracking-[2px] text-gray-400">Winner</div>
+          <div class="font-display text-lg text-purple-800 truncate">${winner ? escHtml(winner.name) : '-'}</div>
+        </div>
+      </div>
+
+      <div class="rounded-2xl border-2 border-purple-100 p-3">
+        <div class="flex items-center justify-between mb-3">
+          <div class="font-display text-lg text-purple-800">Final Scores</div>
+          <div class="text-xs text-gray-400">${match.week_key || ''}</div>
+        </div>
+        <div class="flex flex-col gap-2">
+          ${players.map((p, i) => `
+            <div class="flex items-center gap-3 rounded-2xl bg-gray-50 p-3">
+              <div class="w-3 h-3 rounded-full shrink-0" style="background:${p.color || '#999'}"></div>
+              <div class="flex-1 min-w-0">
+                <div class="font-black text-gray-800 truncate">${escHtml(p.name)}</div>
+                <div class="text-[11px] text-gray-400">Round delta: ${asNumber(p.delta) >= 0 ? '+' : ''}${asNumber(p.delta)}</div>
+              </div>
+              <div class="font-display text-xl font-black" style="color:${p.color || '#6b21a8'}">${asNumber(p.total)}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+
+      <div class="rounded-2xl border-2 border-purple-100 p-3">
+        <div class="font-display text-lg text-purple-800 mb-2">Round Timeline</div>
+        <div class="flex flex-col gap-2">
+          ${history.map((row, idx) => `
+            <div class="rounded-2xl bg-gray-50 p-3">
+              <div class="flex items-center justify-between mb-2">
+                <div class="font-black text-gray-700">Round ${row.round ?? idx + 1}</div>
+                <div class="text-[11px] text-gray-400">${(row.scores || []).reduce((s, v) => s + asNumber(v), 0) >= 0 ? '+' : ''}${(row.scores || []).reduce((s, v) => s + asNumber(v), 0)}</div>
+              </div>
+              <div class="grid gap-2" style="grid-template-columns: repeat(${Math.max(players.length, 1)}, minmax(0,1fr));">
+                ${(row.scores || []).map((s, pi) => `
+                  <div class="rounded-xl px-2 py-2 text-center text-xs font-black text-white" style="background:${players[pi]?.color || '#7c3aed'}">
+                    ${players[pi]?.name ? escHtml(players[pi].name) : `P${pi + 1}`}<br>
+                    ${asNumber(s) >= 0 ? '+' : ''}${asNumber(s)}
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    </div>`;
+  modal.classList.remove('hidden');
+}
+
+async function startSession() {
   const ppr = Math.max(1, parseInt(document.getElementById('points-per-round').value) || 10);
-  const players = Array.from({ length: setupCount }, (_, i) => ({
-    name:       (document.getElementById(`name-${i}`).value.trim() || `Player ${i + 1}`).slice(0, 12),
-    color:      document.getElementById(`color-${i}`).value,
+  const players = [];
+  state = { active: true, ended: false, round: 1, pointsPerRound: ppr, focusedIdx: null, history: [], players, roomId: syncRoomId || '' };
+  const selected = await getSelectedPlayers().catch(() => []);
+  const fallback = Array.from({ length: setupCount }, (_, i) => ({
+    id: `local-${i}-${Date.now()}`,
+    name: `Player ${i + 1}`,
+    color: PLAYER_COLORS[i % PLAYER_COLORS.length],
+    balance: 0,
+  }));
+  const source = selected.length ? selected : fallback;
+  state.players = source.map(p => ({
+    id: p.id,
+    name: p.name,
+    color: p.color || PLAYER_COLORS[0],
+    balance: asNumber(p.balance),
     totalScore: 0,
     roundScore: 0,
   }));
-
-  state = { active: true, ended: false, round: 1, pointsPerRound: ppr, focusedIdx: null, history: [], players, roomId: syncRoomId || '' };
-  saveConfig(players, ppr);
+  saveSelectedPlayerIds(state.players.map(p => p.id)).catch(() => {});
+  saveConfig(state.players, ppr).catch(() => {});
   saveState();
   renderGame();
   showScreen('game-screen');
@@ -628,10 +938,50 @@ function endSession() {
       scores: state.players.map(p => p.roundScore),
     });
   }
-  state.players.forEach(p => { p.totalScore += p.roundScore; p.roundScore = 0; });
+  const finalTotals = state.players.map(p => asNumber(p.totalScore) + asNumber(p.roundScore));
+  const deltas = state.players.map((p, i) => finalTotals[i] - asNumber(p.balance || 0));
+  state.players.forEach((p, i) => {
+    p.totalScore = finalTotals[i];
+    p.roundScore = 0;
+  });
   state.active = false;
   state.ended  = true;
   saveState();
+  if (sb) {
+    const playedAt = new Date().toISOString();
+    const weekKey = isoWeekKey(new Date());
+    const result = {
+      round: state.round,
+      players: state.players.map((p, i) => ({
+        id: p.id || p.name,
+        name: p.name,
+        color: p.color,
+        delta: deltas[i],
+        total: p.totalScore,
+      })),
+      history: state.history,
+    };
+    saveMatchResult({ id: state.roomId || crypto.randomUUID(), played_at: playedAt, week_key: weekKey, result, created_at: playedAt }).catch(() => {});
+    const historyRows = state.players.map((p, i) => ({
+      id: crypto.randomUUID(),
+      player_id: p.id || p.name,
+      match_id: state.roomId || '',
+      balance_before: asNumber(p.balance || 0),
+      delta: asNumber(deltas[i]),
+      balance_after: asNumber(p.balance || 0) + asNumber(deltas[i]),
+      note: 'match result',
+      created_at: playedAt,
+    }));
+    Promise.all([
+      saveBalanceHistory(historyRows),
+      Promise.all(state.players.map((p, i) => {
+        const balance = asNumber(p.balance || 0) + asNumber(deltas[i]);
+        p.balance = balance;
+        p.transfer_status = balance !== 0 ? 'pending' : 'transferred';
+        return upsertPlayer(p);
+      })),
+    ]).catch(() => {});
+  }
   showResults();
   showScreen('result-screen');
 }
@@ -809,24 +1159,18 @@ function escHtml(s) {
 // ══════════════════════════════════════════════════════════════════════════
 // BOOT – wire events, restore or start fresh
 // ══════════════════════════════════════════════════════════════════════════
-document.addEventListener('DOMContentLoaded', () => {
-
-  // Setup: stepper buttons
-  document.querySelectorAll('.stepper-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      setupCount = Math.min(MAX_PLAYERS, Math.max(MIN_PLAYERS, setupCount + parseInt(btn.dataset.dir)));
-      refreshCountUI();
-      // Preserve what the user has already typed by snapshotting current inputs
-      const currentCfg = { players: Array.from({ length: MAX_PLAYERS }, (_, i) => ({
-        name:  document.getElementById(`name-${i}`)  ? document.getElementById(`name-${i}`).value  : PLAYER_COLORS[i],
-        color: document.getElementById(`color-${i}`) ? document.getElementById(`color-${i}`).value : PLAYER_COLORS[i % PLAYER_COLORS.length],
-      })) };
-      buildPlayerConfigs(currentCfg);
-    });
-  });
+document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('start-btn').addEventListener('click', startSession);
   document.getElementById('reset-config-btn').addEventListener('click', resetConfig);
+  document.getElementById('manage-players-btn').addEventListener('click', async () => {
+    showScreen('players-screen');
+    await renderPlayersAdmin();
+  });
+  document.getElementById('weekly-report-btn').addEventListener('click', async () => {
+    showScreen('report-screen');
+    await renderWeeklyReport();
+  });
   document.getElementById('share-view-btn').addEventListener('click', async () => {
     if (!syncRoomId) return;
     await navigator.clipboard.writeText(roomUrl());
@@ -904,45 +1248,72 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Results: play again
-  document.getElementById('play-again-btn').addEventListener('click', () => {
-    clearState();
-    initSetup();
+  document.getElementById('play-again-btn').addEventListener('click', async () => {
+    try {
+      await clearState();
+      await initSetup();
+    } catch (err) {
+      console.error('play-again failed:', err);
+    }
     showScreen('setup-screen');
   });
+  document.getElementById('players-back-btn').addEventListener('click', async () => {
+    try { await initSetup(); } catch (err) { console.error('back to setup failed:', err); }
+    showScreen('setup-screen');
+  });
+  document.getElementById('report-back-btn').addEventListener('click', async () => {
+    try { await initSetup(); } catch (err) { console.error('back to setup failed:', err); }
+    showScreen('setup-screen');
+  });
+  document.getElementById('add-player-btn').addEventListener('click', async () => {
+    const input = document.getElementById('new-player-name');
+    const name = input.value.trim();
+    if (!name) return;
+    await upsertPlayer({ name, balance: 0, transfer_status: 'transferred' }).catch(() => {});
+    input.value = '';
+    renderPlayersAdmin();
+  });
+  document.getElementById('reset-app-btn').addEventListener('click', async () => {
+    if (!confirm('Reset all reports and balances? Player names and colors will be kept. This cannot be undone.')) return;
+    try {
+      await resetAppData();
+      await renderPlayersAdmin();
+      alert('App data has been reset.');
+    } catch (e) {
+      alert('Failed to reset app data.');
+    }
+  });
+  document.getElementById('match-detail-close').addEventListener('click', () => document.getElementById('match-detail-modal').classList.add('hidden'));
+  document.getElementById('match-detail-modal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) e.currentTarget.classList.add('hidden');
+  });
 
-  if (syncRoomId && sb && (appMode === 'view' || appMode === 'edit')) {
-    loadRemoteRoom(syncRoomId).then(async payload => {
-      if (payload?.state) {
-        state = payload.state;
-        renderGame();
-        if (state.ended) {
-          showResults();
-          showScreen('result-screen');
-        } else {
-          showScreen('game-screen');
-        }
-        await startRealtime(syncRoomId);
-        setShareUi(true);
-      }
-    }).catch(() => {
-      initSetup();
-      showScreen('setup-screen');
-    });
-  } else {
-    const restored = loadState();
+  if (sb) {
+    // Ensure a room id always exists so state persists via the database,
+    // anchored in the URL instead of localStorage.
+    if (!syncRoomId) {
+      syncRoomId = crypto.randomUUID();
+      const url = new URL(location.href);
+      url.searchParams.set('room', syncRoomId);
+      history.replaceState(null, '', url.toString());
+    }
+    await startRealtime(syncRoomId);
+    const restored = await loadState();
     if (restored && state.active) {
       renderGame();
       showScreen('game-screen');
-      setShareUi(true);
     } else if (restored && state.ended) {
       showResults();
       showScreen('result-screen');
-      setShareUi(true);
     } else {
-      initSetup();
+      try { await initSetup(); } catch (err) { console.error('initSetup failed:', err); }
       showScreen('setup-screen');
-      setShareUi(false);
     }
+    setShareUi(true);
+  } else {
+    try { await initSetup(); } catch (err) { console.error('initSetup failed:', err); }
+    showScreen('setup-screen');
+    setShareUi(false);
   }
 
   if (appMode === 'view') {

@@ -195,23 +195,6 @@
           🎮 Point Count!
         </h1>
 
-        <!-- Player count -->
-        <div class="flex flex-col gap-2">
-          <span class="text-[11px] font-black uppercase tracking-[2.5px] text-gray-400">Players</span>
-          <div class="flex items-center gap-4">
-            <button data-dir="-1"
-              class="stepper-btn w-12 h-12 rounded-full bg-purple-700 text-white font-display text-3xl
-                     shadow-md active:scale-90 transition-transform select-none
-                     flex items-center justify-center leading-none pb-0.5">−</button>
-            <span id="player-count-display"
-              class="font-display text-5xl text-purple-700 min-w-[2.5rem] text-center tabular-nums">2</span>
-            <button data-dir="1"
-              class="stepper-btn w-12 h-12 rounded-full bg-purple-700 text-white font-display text-3xl
-                     shadow-md active:scale-90 transition-transform select-none
-                     flex items-center justify-center leading-none pb-0.5">+</button>
-          </div>
-        </div>
-
         <!-- Points per tap -->
         <div class="flex flex-col gap-2">
           <label for="points-per-round"
@@ -238,6 +221,11 @@
                  border-2 border-gray-200 active:scale-95 transition-transform select-none">
           🗑 Reset players
         </button>
+
+        <div class="grid grid-cols-2 gap-3">
+          <button id="manage-players-btn" class="w-full py-3 rounded-full bg-purple-700 text-white font-black">Players</button>
+          <button id="weekly-report-btn" class="w-full py-3 rounded-full bg-indigo-600 text-white font-black">Report</button>
+        </div>
 
       </div>
     </div>
@@ -372,6 +360,59 @@
           🔄 Play Again!
         </button>
       </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       PLAYER MANAGEMENT SCREEN
+  ═══════════════════════════════════════════════════════ -->
+  <div id="players-screen" class="screen overflow-y-auto flex flex-col items-center
+       bg-gradient-to-br from-[#160429] via-[#3a0c6e] to-[#160429]">
+    <div class="w-full max-w-2xl px-4 py-6">
+      <div class="bg-white rounded-3xl shadow-2xl p-6 flex flex-col gap-5">
+        <div class="flex items-center justify-between gap-3">
+          <h2 class="font-display text-3xl text-purple-800">Players</h2>
+          <div class="flex items-center gap-2">
+            <span id="selected-players-info" class="text-xs font-black uppercase tracking-[2px] text-gray-400">0 selected</span>
+            <button id="players-back-btn" class="px-4 py-2 rounded-full bg-gray-100 font-black text-sm text-gray-600">Back</button>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="new-player-name" class="flex-1 h-11 rounded-xl border-2 border-purple-100 px-3 outline-none" placeholder="Player name" />
+          <button id="add-player-btn" class="h-11 px-4 rounded-full bg-purple-700 text-white font-black">Add</button>
+        </div>
+        <div id="players-admin-list" class="flex flex-col gap-3"></div>
+        <button id="reset-app-btn" class="mt-2 h-11 rounded-full bg-red-50 text-red-600 border-2 border-red-200 font-black text-sm">
+          ⚠️ Reset App Data (keep player names/colors)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       WEEK REPORT SCREEN
+  ═══════════════════════════════════════════════════════ -->
+  <div id="report-screen" class="screen overflow-y-auto flex flex-col items-center
+       bg-gradient-to-br from-[#160429] via-[#3a0c6e] to-[#160429]">
+    <div class="w-full max-w-2xl px-4 py-6">
+      <div class="bg-white rounded-3xl shadow-2xl p-6 flex flex-col gap-4">
+        <div class="flex items-center justify-between gap-3">
+          <h2 class="font-display text-3xl text-purple-800">Weekly Report</h2>
+          <button id="report-back-btn" class="px-4 py-2 rounded-full bg-gray-100 font-black text-sm text-gray-600">Back</button>
+        </div>
+        <div id="week-tabs" class="flex gap-2 overflow-x-auto pb-1"></div>
+        <div id="week-report-list" class="flex flex-col gap-3"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="match-detail-modal" class="hidden fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center px-4">
+    <div class="w-full max-w-lg bg-white rounded-3xl shadow-2xl p-5 max-h-[85vh] flex flex-col">
+      <div class="flex items-center justify-between gap-3 mb-4 shrink-0">
+        <h3 id="match-detail-title" class="font-display text-2xl text-purple-800"></h3>
+        <button id="match-detail-close" class="w-9 h-9 rounded-full bg-gray-100 font-black shrink-0">✕</button>
+      </div>
+      <div id="match-detail-body" class="text-sm overflow-y-auto pr-1"></div>
     </div>
   </div>
 
