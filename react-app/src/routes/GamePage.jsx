@@ -34,6 +34,39 @@ function getRemainDelta(players, idx) {
   return othersSum !== 0 ? -othersSum : null;
 }
 
+function ordinal(n) {
+  const rem100 = n % 100;
+  if (rem100 >= 11 && rem100 <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1: return `${n}st`;
+    case 2: return `${n}nd`;
+    case 3: return `${n}rd`;
+    default: return `${n}th`;
+  }
+}
+
+// Competition ranking (ties share a rank, next distinct value skips accordingly).
+function getRoundRanks(scores) {
+  const sorted = [...scores].sort((a, b) => b - a);
+  return scores.map((score) => sorted.findIndex((s) => s === score) + 1);
+}
+
+function getMedal(rank) {
+  if (rank === 1) return '🥇';
+  if (rank === 2) return '🥈';
+  if (rank === 3) return '🥉';
+  return ordinal(rank);
+}
+
+function getLastRoundBadges(state) {
+  if (!state.history.length) return null;
+  const last = state.history[state.history.length - 1];
+  const scores = last.scores || [];
+  if (!scores.length || scores.every((s) => s === 0)) return null;
+  const ranks = getRoundRanks(scores);
+  return scores.map((delta, i) => ({ rank: ranks[i], delta }));
+}
+
 function spawnFloatScore(cell, text, color) {
   const rect = cell.getBoundingClientRect();
   const f = document.createElement('div');
@@ -136,7 +169,7 @@ function LiveChart({ history, active, players }) {
   );
 }
 
-function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRemain, onReset }) {
+function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRemain, onReset, lastRoundBadge, totalRank }) {
   const cellRef = useRef(null);
   const holdTimerRef = useRef(null);
   const holdStartRef = useRef(null);
@@ -224,15 +257,22 @@ function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRema
       <span className="score-display">{roundScore > 0 ? `+${roundScore}` : `${roundScore}`}</span>
       <div className="flex flex-col items-center mt-1 gap-0.5 leading-none">
         <span className="name-display">{escHtml(player.name)}</span>
-        <span className="total-display">🏆 {asNumber(player.totalScore)}</span>
       </div>
+      {lastRoundBadge ? (
+        <span className="absolute top-2 left-2 text-base font-black tracking-[0.5px] bg-black/20 rounded-full px-3 py-1.5 shadow-md">
+          ({ordinal(lastRoundBadge.rank)}:{lastRoundBadge.delta > 0 ? `+${lastRoundBadge.delta}` : `${lastRoundBadge.delta}`})
+        </span>
+      ) : null}
+      <span className="absolute bottom-2 right-2 text-lg font-black tracking-[0.5px] bg-black/20 rounded-full px-4 py-2 shadow-md">
+        {getMedal(totalRank)}: {asNumber(player.totalScore)}
+      </span>
       <div className="absolute bottom-1 left-1/2 -translate-x-1/2 text-[10px] font-black tracking-[2px] uppercase opacity-75 pointer-events-none">
         top + / bottom -
       </div>
       {remainVisible ? (
         <button
           type="button"
-          className="remain-btn absolute right-2 top-1/2 -translate-y-1/2 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-[1px] bg-white/90 text-purple-800 shadow-md"
+          className="remain-btn absolute right-2 top-1/2 -translate-y-1/2 px-4 py-2.5 rounded-full text-sm font-black uppercase tracking-[1px] bg-white/90 text-purple-800 shadow-md"
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -257,6 +297,8 @@ export default function GamePage() {
 
   const players = state.players;
   const roundTotal = useMemo(() => players.reduce((sum, p) => sum + asNumber(p.roundScore), 0), [players]);
+  const lastRoundBadges = useMemo(() => getLastRoundBadges(state), [state.history]);
+  const totalRanks = useMemo(() => getRoundRanks(players.map((p) => asNumber(p.totalScore))), [players]);
 
   useEffect(() => () => {
     clearTimeout(nextTimerRef.current);
@@ -346,6 +388,8 @@ export default function GamePage() {
             onTap={(subtract) => doTap(idx, subtract)}
             onRemain={{ getDelta: () => getRemainDelta(players, idx), apply: () => doRemain(idx) }}
             onReset={() => doReset(idx)}
+            lastRoundBadge={asNumber(player.roundScore) === 0 && lastRoundBadges ? lastRoundBadges[idx] : null}
+            totalRank={totalRanks[idx]}
           />
         ))}
       </div>
