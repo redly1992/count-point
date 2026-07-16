@@ -119,6 +119,13 @@ export function GameProvider({ children }) {
     updateState({ ...state, players: nextPlayers, focusedIdx: idx });
   }, [state, updateState, roomSync]);
 
+  const setPlayerColor = useCallback((idx, color) => {
+    if (!roomSync.canEdit) return;
+    const nextPlayers = state.players.map((player, playerIdx) => (playerIdx === idx ? { ...player, color } : player));
+    updateState({ ...state, players: nextPlayers });
+    upsertPlayer({ ...state.players[idx], color }).catch(() => {});
+  }, [state, updateState, roomSync]);
+
   const nextRound = useCallback(() => {
     if (!roomSync.canEdit) return;
     const historyRow = { round: state.round, scores: state.players.map((p) => asNumber(p.roundScore)) };
@@ -208,9 +215,10 @@ export function GameProvider({ children }) {
     resetRoundScore,
     nextRound,
     endSession,
+    setPlayerColor,
     getRoundTotal: () => getRoundTotal(state),
     ...roomSync,
-  }), [applyRemain, endSession, nextRound, resetRoundScore, roomSync, setPlayers, startSession, state, tapPlayer]);
+  }), [applyRemain, endSession, nextRound, resetRoundScore, roomSync, setPlayerColor, setPlayers, startSession, state, tapPlayer]);
 
   return <GameStateContext.Provider value={value}>{children}</GameStateContext.Provider>;
 }

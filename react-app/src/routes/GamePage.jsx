@@ -169,8 +169,9 @@ function LiveChart({ history, active, players }) {
   );
 }
 
-function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRemain, onReset, lastRoundBadge, totalRank }) {
+function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRemain, onReset, onColorChange, lastRoundBadge, totalRank }) {
   const cellRef = useRef(null);
+  const colorInputRef = useRef(null);
   const holdTimerRef = useRef(null);
   const holdStartRef = useRef(null);
   const longPressFiredRef = useRef(false);
@@ -259,16 +260,39 @@ function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRema
         <span className="name-display">{escHtml(player.name)}</span>
       </div>
       {lastRoundBadge ? (
-        <span className="absolute top-2 left-2 text-base font-black tracking-[0.5px] bg-black/20 rounded-full px-3 py-1.5 shadow-md">
+        <span className="absolute top-2 left-2 text-[2rem] font-black tracking-[0.5px] bg-black/20 rounded-full px-6 py-3 shadow-md">
           ({ordinal(lastRoundBadge.rank)}:{lastRoundBadge.delta > 0 ? `+${lastRoundBadge.delta}` : `${lastRoundBadge.delta}`})
         </span>
       ) : null}
-      <span className="absolute bottom-2 right-2 text-lg font-black tracking-[0.5px] bg-black/20 rounded-full px-4 py-2 shadow-md">
+      <span className="absolute bottom-2 right-2 text-[2.25rem] font-black tracking-[0.5px] bg-black/20 rounded-full px-8 py-4 shadow-md">
         {getMedal(totalRank)}: {asNumber(player.totalScore)}
       </span>
       <div className="absolute bottom-1 left-1/2 -translate-x-1/2 text-[10px] font-black tracking-[2px] uppercase opacity-75 pointer-events-none">
         top + / bottom -
       </div>
+      {canEdit ? (
+        <>
+          <button
+            type="button"
+            className="color-swatch-btn absolute top-2 right-2 w-12 h-12 rounded-full border-[3px] border-white/90 shadow-lg active:scale-95 transition-transform"
+            style={{ backgroundColor: player.color }}
+            aria-label={`Change ${player.name}'s color`}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              colorInputRef.current?.click();
+            }}
+          />
+          <input
+            ref={colorInputRef}
+            type="color"
+            value={player.color}
+            className="absolute top-2 right-2 w-12 h-12 opacity-0 pointer-events-none"
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => onColorChange(e.target.value)}
+          />
+        </>
+      ) : null}
       {remainVisible ? (
         <button
           type="button"
@@ -288,7 +312,7 @@ function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRema
 
 export default function GamePage() {
   const navigate = useNavigate();
-  const { state, tapPlayer, applyRemain, resetRoundScore, nextRound, endSession, canEdit, roomUrl, editRoomUrl, roomId } = useGameState();
+  const { state, tapPlayer, applyRemain, resetRoundScore, nextRound, endSession, setPlayerColor, canEdit, roomUrl, editRoomUrl, roomId } = useGameState();
   const [showHistory, setShowHistory] = useState(false);
   const [nextPending, setNextPending] = useState(false);
   const [endPending, setEndPending] = useState(false);
@@ -388,6 +412,7 @@ export default function GamePage() {
             onTap={(subtract) => doTap(idx, subtract)}
             onRemain={{ getDelta: () => getRemainDelta(players, idx), apply: () => doRemain(idx) }}
             onReset={() => doReset(idx)}
+            onColorChange={(color) => setPlayerColor(idx, color)}
             lastRoundBadge={asNumber(player.roundScore) === 0 && lastRoundBadges ? lastRoundBadges[idx] : null}
             totalRank={totalRanks[idx]}
           />
