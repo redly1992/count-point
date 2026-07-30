@@ -9,6 +9,7 @@ import GamePage from './routes/GamePage';
 import ResultPage from './routes/ResultPage';
 import PlayersPage from './routes/PlayersPage';
 import ReportPage from './routes/ReportPage';
+import RankingPage from './routes/RankingPage';
 
 // Keeps collaborators/viewers in sync with the host: when the remote game
 // state flips to active/ended (via realtime), follow along automatically
@@ -47,6 +48,7 @@ export default function App() {
             <Route path="/result" element={<ResultPage />} />
             <Route path="/players" element={<PlayersPage />} />
             <Route path="/report" element={<ReportPage />} />
+            <Route path="/ranking" element={<RankingPage />} />
             <Route path="*" element={<Navigate to={{ pathname: '/', search: location.search }} replace />} />
           </Routes>
         </AppShell>

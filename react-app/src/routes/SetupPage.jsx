@@ -112,6 +112,9 @@ export default function SetupPage() {
               Report
             </Link>
           </div>
+          <Link id="total-ranking-btn" to="/ranking" className="w-full py-3 rounded-full bg-gradient-to-r from-amber-500 to-orange-600 text-white font-black text-center">
+            🏆 Total Ranking
+          </Link>
         </div>
       </div>
     </div>
