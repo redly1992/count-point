@@ -61,6 +61,12 @@ export async function saveMatchResult(match) {
   if (error) throw error;
 }
 
+export async function deleteMatch(matchId) {
+  if (!sb) return;
+  const { error } = await sb.from(MATCH_TABLE).delete().eq('id', matchId);
+  if (error) throw error;
+}
+
 export async function saveBalanceHistory(rows) {
   if (!sb || !rows.length) return;
   const { error } = await sb.from(BALANCE_HISTORY_TABLE).insert(rows);

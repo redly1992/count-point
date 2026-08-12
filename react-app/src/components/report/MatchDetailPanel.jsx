@@ -1,6 +1,6 @@
 import { asNumber, escHtml } from '../../lib/helpers';
 
-export default function MatchDetailPanel({ match, onClose }) {
+export default function MatchDetailPanel({ match, onClose, onDelete }) {
   if (!match) return null;
   const result = match.result || {};
   const players = Array.isArray(result.players) ? result.players : [];
@@ -15,7 +15,20 @@ export default function MatchDetailPanel({ match, onClose }) {
       <div className="w-full max-w-lg bg-white rounded-3xl shadow-2xl p-5 max-h-[85vh] flex flex-col">
         <div className="flex items-center justify-between gap-3 mb-4 shrink-0">
           <h3 className="font-display text-2xl text-purple-800">{match.playedLabel}</h3>
-          <button type="button" onClick={onClose} className="w-9 h-9 rounded-full bg-gray-100 font-black shrink-0">✕</button>
+          <div className="flex items-center gap-2 shrink-0">
+            {onDelete ? (
+              <button
+                type="button"
+                onClick={() => onDelete(match)}
+                className="w-9 h-9 rounded-full bg-red-50 text-red-500 font-black"
+                aria-label="Delete report"
+                title="Delete report"
+              >
+                🗑
+              </button>
+            ) : null}
+            <button type="button" onClick={onClose} className="w-9 h-9 rounded-full bg-gray-100 font-black shrink-0">✕</button>
+          </div>
         </div>
         <div className="text-sm overflow-y-auto pr-1">
           <div className="flex flex-col gap-4">
