@@ -20,7 +20,6 @@ body {
 /* ── Player cell ───────────────────────────────────────────── */
 .player-area {
   position: relative;
-  overflow: hidden;
   container-type: size;
   border-radius: 14px;
   display: flex;
@@ -111,6 +110,17 @@ body {
   100%{ opacity:0; transform:translate(-50%,-240%) scale(.8); }
 }
 @keyframes trophy-float { from{transform:translateY(0)} to{transform:translateY(-10px)} }
+@keyframes avatar-bounce {
+  0%, 100% { transform: translateY(0) rotate(-4deg) scale(1); }
+  25%      { transform: translateY(-6px) rotate(3deg) scale(1.05); }
+  50%      { transform: translateY(0) rotate(-3deg) scale(1); }
+  75%      { transform: translateY(-3px) rotate(4deg) scale(1.03); }
+}
+.avatar-anim {
+  display: inline-block;
+  animation: avatar-bounce 1.6s ease-in-out infinite;
+  will-change: transform;
+}
 @keyframes round-pop {
   0%  { color:#f9c74f; transform:scale(1.45); }
   100%{ color:#fff;    transform:scale(1);   }

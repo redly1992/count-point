@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { useGameState } from '../context/GameStateContext';
 import { asNumber, contrastColor, escHtml } from '../lib/helpers';
 import HistoryModal from '../components/game/HistoryModal';
+import { AVATAR_OPTIONS, randomColor, randomAvatar } from '../lib/avatarStore';
 
 function getGridCols(n) {
   const map = {
@@ -169,7 +171,7 @@ function LiveChart({ history, active, players }) {
   );
 }
 
-function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRemain, onReset, onColorChange, lastRoundBadge, totalRank }) {
+function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRemain, onReset, onColorChange, onAvatarChange, lastRoundBadge, totalRank }) {
   const cellRef = useRef(null);
   const colorInputRef = useRef(null);
   const holdTimerRef = useRef(null);
@@ -177,6 +179,7 @@ function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRema
   const longPressFiredRef = useRef(false);
   const [holding, setHolding] = useState(false);
   const [tapped, setTapped] = useState(false);
+  const [showAvatarPicker, setShowAvatarPicker] = useState(false);
 
   const roundScore = asNumber(player.roundScore);
   const remainDelta = onRemain.getDelta();
@@ -257,6 +260,7 @@ function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRema
     >
       <span className="score-display">{roundScore > 0 ? `+${roundScore}` : `${roundScore}`}</span>
       <div className="flex flex-col items-center mt-1 gap-0.5 leading-none">
+        {player.avatar ? <span className="avatar-anim text-6xl leading-none">{player.avatar}</span> : null}
         <span className="name-display">{escHtml(player.name)}</span>
       </div>
       {lastRoundBadge ? (
@@ -264,47 +268,126 @@ function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRema
           ({ordinal(lastRoundBadge.rank)}:{lastRoundBadge.delta > 0 ? `+${lastRoundBadge.delta}` : `${lastRoundBadge.delta}`})
         </span>
       ) : null}
-      <span className="absolute bottom-2 right-2 text-[2.25rem] font-black tracking-[0.5px] bg-black/20 rounded-full px-8 py-4 shadow-md">
+      <span className="absolute top-2 right-2 text-[2.25rem] font-black tracking-[0.5px] bg-black/20 rounded-full px-8 py-4 shadow-md">
         {getMedal(totalRank)}: {asNumber(player.totalScore)}
       </span>
-      <div className="absolute bottom-1 left-1/2 -translate-x-1/2 text-[10px] font-black tracking-[2px] uppercase opacity-75 pointer-events-none">
-        top + / bottom -
-      </div>
       {canEdit ? (
         <>
-          <button
-            type="button"
-            className="color-swatch-btn absolute top-2 right-2 w-12 h-12 rounded-full border-[3px] border-white/90 shadow-lg active:scale-95 transition-transform"
-            style={{ backgroundColor: player.color }}
-            aria-label={`Change ${player.name}'s color`}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              colorInputRef.current?.click();
-            }}
-          />
+          <div
+            className="absolute bottom-1.5 inset-x-1.5 z-20 flex items-center justify-center gap-2.5 rounded-2xl bg-black/35 backdrop-blur-sm px-2 py-2"
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="color-swatch-btn w-12 h-12 shrink-0 rounded-full border-[3px] border-white/90 shadow-lg active:scale-90 transition-transform touch-manipulation"
+              style={{ backgroundColor: player.color }}
+              aria-label={`Change ${player.name}'s color`}
+              onClick={(e) => {
+                e.preventDefault();
+                colorInputRef.current?.click();
+              }}
+            />
+            <button
+              type="button"
+              className="w-12 h-12 shrink-0 rounded-full border-[3px] border-white/90 shadow-lg active:scale-90 transition-transform touch-manipulation bg-white/25 flex items-center justify-center text-2xl"
+              aria-label={`Random color and avatar for ${player.name}`}
+              title="Random color & avatar"
+              onClick={(e) => {
+                e.preventDefault();
+                onColorChange(randomColor());
+                onAvatarChange(randomAvatar(player.avatar));
+              }}
+            >
+              🎲
+            </button>
+            <button
+              type="button"
+              className="w-12 h-12 shrink-0 rounded-full border-[3px] border-white/90 shadow-lg active:scale-90 transition-transform touch-manipulation bg-white/25 flex items-center justify-center text-2xl"
+              aria-label={`Pick avatar for ${player.name}`}
+              title="Pick avatar"
+              onClick={(e) => {
+                e.preventDefault();
+                setShowAvatarPicker(true);
+              }}
+            >
+              🎭
+            </button>
+            {remainVisible ? (
+              <button
+                type="button"
+                className="remain-btn shrink-0 px-4 h-12 rounded-full text-sm font-black uppercase tracking-[1px] bg-white/90 text-purple-800 shadow-md active:scale-90 transition-transform touch-manipulation"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onRemain.apply();
+                }}
+              >
+                Remain
+              </button>
+            ) : null}
+          </div>
           <input
             ref={colorInputRef}
             type="color"
             value={player.color}
-            className="absolute top-2 right-2 w-12 h-12 opacity-0 pointer-events-none"
+            className="absolute bottom-1.5 left-1.5 w-12 h-12 opacity-0 pointer-events-none"
             onClick={(e) => e.stopPropagation()}
             onChange={(e) => onColorChange(e.target.value)}
           />
+          {showAvatarPicker
+            ? createPortal(
+                <div
+                  className="fixed inset-0 z-[200] bg-black/70 backdrop-blur-sm flex items-center justify-center px-4"
+                  onClick={() => setShowAvatarPicker(false)}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onTouchStart={(e) => e.stopPropagation()}
+                >
+                  <div
+                    className="w-full max-w-sm bg-[#1c0b33] rounded-3xl p-4 shadow-2xl"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center justify-between mb-3">
+                      <span className="font-display text-lg text-white">Pick Avatar</span>
+                      <button
+                        type="button"
+                        className="w-10 h-10 rounded-full bg-white/15 text-white font-black active:scale-90 transition-transform"
+                        onClick={() => setShowAvatarPicker(false)}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-4 gap-3">
+                      {AVATAR_OPTIONS.map((emoji) => (
+                        <button
+                          key={emoji}
+                          type="button"
+                          className="w-16 h-16 rounded-2xl bg-white/10 text-3xl flex items-center justify-center active:scale-90 transition-transform touch-manipulation"
+                          onClick={() => {
+                            onAvatarChange(emoji);
+                            setShowAvatarPicker(false);
+                          }}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      className="w-full mt-3 py-3 rounded-2xl bg-white/10 text-sm font-black uppercase tracking-[1px] text-white/80 active:scale-95 transition-transform touch-manipulation"
+                      onClick={() => {
+                        onAvatarChange(null);
+                        setShowAvatarPicker(false);
+                      }}
+                    >
+                      Remove Avatar
+                    </button>
+                  </div>
+                </div>,
+                document.body,
+              )
+            : null}
         </>
-      ) : null}
-      {remainVisible ? (
-        <button
-          type="button"
-          className="remain-btn absolute right-2 top-1/2 -translate-y-1/2 px-4 py-2.5 rounded-full text-sm font-black uppercase tracking-[1px] bg-white/90 text-purple-800 shadow-md"
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onRemain.apply();
-          }}
-        >
-          Remain
-        </button>
       ) : null}
     </button>
   );
@@ -312,7 +395,7 @@ function PlayerCell({ player, idx, totalPlayers, focused, canEdit, onTap, onRema
 
 export default function GamePage() {
   const navigate = useNavigate();
-  const { state, tapPlayer, applyRemain, resetRoundScore, nextRound, endSession, setPlayerColor, canEdit, roomUrl, editRoomUrl, roomId } = useGameState();
+  const { state, tapPlayer, applyRemain, resetRoundScore, nextRound, endSession, setPlayerColor, setPlayerAvatar, canEdit, roomUrl, editRoomUrl, roomId } = useGameState();
   const [showHistory, setShowHistory] = useState(false);
   const [nextPending, setNextPending] = useState(false);
   const [endPending, setEndPending] = useState(false);
@@ -413,6 +496,7 @@ export default function GamePage() {
             onRemain={{ getDelta: () => getRemainDelta(players, idx), apply: () => doRemain(idx) }}
             onReset={() => doReset(idx)}
             onColorChange={(color) => setPlayerColor(idx, color)}
+            onAvatarChange={(avatar) => setPlayerAvatar(idx, avatar)}
             lastRoundBadge={asNumber(player.roundScore) === 0 && lastRoundBadges ? lastRoundBadges[idx] : null}
             totalRank={totalRanks[idx]}
           />

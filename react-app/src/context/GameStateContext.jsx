@@ -1,8 +1,9 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useRoomSync } from '../hooks/useRoomSync';
 import { sb } from '../lib/supabaseClient';
 import { saveMatchResult, saveBalanceHistory, upsertPlayer } from '../hooks/useGamePersistence';
 import { isoWeekKey } from '../lib/helpers';
+import { getAvatar, setAvatar as persistAvatar } from '../lib/avatarStore';
 
 const DEFAULT_STATE = {
   active: false,
@@ -37,6 +38,7 @@ function normalizeState(nextState) {
           totalScore: asNumber(player.totalScore),
           roundScore: asNumber(player.roundScore),
           transfer_status: player.transfer_status,
+          avatar: player.avatar || null,
         }))
       : [],
   };
@@ -49,17 +51,24 @@ function getRoundTotal(state) {
 export function GameProvider({ children }) {
   const [state, setState] = useState(DEFAULT_STATE);
   const roomSync = useRoomSync(state, setState);
+  // Tracks the latest state synchronously so rapid taps (before React re-renders
+  // and recreates these callbacks) always build on top of each other instead of a
+  // stale render-closure `state`, which was causing dropped/rolled-back points.
+  const stateRef = useRef(state);
+  useEffect(() => { stateRef.current = state; }, [state]);
 
   useEffect(() => {
     roomSync.loadState().catch(() => false);
   }, [roomSync.loadState]);
 
   const updateState = useCallback((updater) => {
-    const next = normalizeState(typeof updater === 'function' ? updater(state) : updater);
+    const prev = stateRef.current;
+    const next = normalizeState(typeof updater === 'function' ? updater(prev) : updater);
+    stateRef.current = next;
     setState(next);
     roomSync.saveState();
     return next;
-  }, [roomSync, state]);
+  }, [roomSync]);
 
   const setPlayers = useCallback((players) => {
     updateState((current) => ({ ...current, players }));
@@ -82,6 +91,7 @@ export function GameProvider({ children }) {
         totalScore: 0,
         roundScore: 0,
         transfer_status: player.transfer_status,
+        avatar: player.avatar || getAvatar(player.id) || null,
       })),
       roomId,
     });
@@ -90,61 +100,84 @@ export function GameProvider({ children }) {
   }, [updateState, roomSync]);
 
   const tapPlayer = useCallback((idx, subtract = false, event = null) => {
-    if (!state.active || !roomSync.canEdit) return;
-    const nextPlayers = state.players.map((player, playerIdx) => {
-      if (playerIdx !== idx) return player;
-      const delta = subtract || (event && event.currentTarget && event.clientY > event.currentTarget.getBoundingClientRect().top + event.currentTarget.getBoundingClientRect().height / 2)
-        ? -state.pointsPerRound
-        : state.pointsPerRound;
-      return { ...player, roundScore: asNumber(player.roundScore) + delta };
+    if (!stateRef.current.active || !roomSync.canEdit) return;
+    updateState((current) => {
+      const nextPlayers = current.players.map((player, playerIdx) => {
+        if (playerIdx !== idx) return player;
+        const delta = subtract || (event && event.currentTarget && event.clientY > event.currentTarget.getBoundingClientRect().top + event.currentTarget.getBoundingClientRect().height / 2)
+          ? -current.pointsPerRound
+          : current.pointsPerRound;
+        return { ...player, roundScore: asNumber(player.roundScore) + delta };
+      });
+      return { ...current, players: nextPlayers, focusedIdx: idx };
     });
-    updateState({ ...state, players: nextPlayers, focusedIdx: idx });
-  }, [state, updateState, roomSync]);
+  }, [updateState, roomSync]);
 
   const applyRemain = useCallback((idx) => {
-    if (!state.active || !roomSync.canEdit) return;
-    const player = state.players[idx];
-    if (!player || asNumber(player.roundScore) !== 0) return;
-    const others = state.players.filter((_, i) => i !== idx);
-    if (others.length === 0 || others.some((p) => asNumber(p.roundScore) === 0)) return;
-    const othersSum = others.reduce((sum, p) => sum + asNumber(p.roundScore), 0);
-    if (othersSum === 0) return;
-    const nextPlayers = state.players.map((p, i) => (i === idx ? { ...p, roundScore: asNumber(p.roundScore) - othersSum } : p));
-    updateState({ ...state, players: nextPlayers, focusedIdx: idx });
-  }, [state, updateState, roomSync]);
+    if (!stateRef.current.active || !roomSync.canEdit) return;
+    updateState((current) => {
+      const player = current.players[idx];
+      if (!player || asNumber(player.roundScore) !== 0) return current;
+      const others = current.players.filter((_, i) => i !== idx);
+      if (others.length === 0 || others.some((p) => asNumber(p.roundScore) === 0)) return current;
+      const othersSum = others.reduce((sum, p) => sum + asNumber(p.roundScore), 0);
+      if (othersSum === 0) return current;
+      const nextPlayers = current.players.map((p, i) => (i === idx ? { ...p, roundScore: asNumber(p.roundScore) - othersSum } : p));
+      return { ...current, players: nextPlayers, focusedIdx: idx };
+    });
+  }, [updateState, roomSync]);
 
   const resetRoundScore = useCallback((idx) => {
-    if (!state.active || !roomSync.canEdit) return;
-    const nextPlayers = state.players.map((player, playerIdx) => (playerIdx === idx ? { ...player, roundScore: 0 } : player));
-    updateState({ ...state, players: nextPlayers, focusedIdx: idx });
-  }, [state, updateState, roomSync]);
+    if (!stateRef.current.active || !roomSync.canEdit) return;
+    updateState((current) => {
+      const nextPlayers = current.players.map((player, playerIdx) => (playerIdx === idx ? { ...player, roundScore: 0 } : player));
+      return { ...current, players: nextPlayers, focusedIdx: idx };
+    });
+  }, [updateState, roomSync]);
 
   const setPlayerColor = useCallback((idx, color) => {
     if (!roomSync.canEdit) return;
-    const nextPlayers = state.players.map((player, playerIdx) => (playerIdx === idx ? { ...player, color } : player));
-    updateState({ ...state, players: nextPlayers });
-    upsertPlayer({ ...state.players[idx], color }).catch(() => {});
-  }, [state, updateState, roomSync]);
+    updateState((current) => {
+      const nextPlayers = current.players.map((player, playerIdx) => (playerIdx === idx ? { ...player, color } : player));
+      return { ...current, players: nextPlayers };
+    });
+    upsertPlayer({ ...stateRef.current.players[idx], color }).catch(() => {});
+  }, [updateState, roomSync]);
+
+  const setPlayerAvatar = useCallback((idx, avatar) => {
+    if (!roomSync.canEdit) return;
+    updateState((current) => {
+      const nextPlayers = current.players.map((player, playerIdx) => (playerIdx === idx ? { ...player, avatar } : player));
+      return { ...current, players: nextPlayers };
+    });
+    // Avatars are cosmetic-only and stored client-side to avoid requiring a
+    // Supabase schema change; not sent through upsertPlayer.
+    const player = stateRef.current.players[idx];
+    if (player?.id) persistAvatar(player.id, avatar);
+  }, [updateState, roomSync]);
 
   const nextRound = useCallback(() => {
     if (!roomSync.canEdit) return;
-    const historyRow = { round: state.round, scores: state.players.map((p) => asNumber(p.roundScore)) };
-    const nextPlayers = state.players.map((player) => ({
-      ...player,
-      totalScore: asNumber(player.totalScore) + asNumber(player.roundScore),
-      roundScore: 0,
-    }));
-    updateState({
-      ...state,
-      round: state.round + 1,
-      history: [...state.history, historyRow],
-      players: nextPlayers,
-      focusedIdx: null,
+    updateState((current) => {
+      const historyRow = { round: current.round, scores: current.players.map((p) => asNumber(p.roundScore)) };
+      const nextPlayers = current.players.map((player) => ({
+        ...player,
+        totalScore: asNumber(player.totalScore) + asNumber(player.roundScore),
+        roundScore: 0,
+      }));
+      return {
+        ...current,
+        round: current.round + 1,
+        history: [...current.history, historyRow],
+        players: nextPlayers,
+        focusedIdx: null,
+      };
     });
-  }, [state, updateState, roomSync]);
+  }, [updateState, roomSync]);
 
   const endSession = useCallback(() => {
     if (!roomSync.canEdit) return;
+    const state = stateRef.current;
     const history = state.players.some((p) => asNumber(p.roundScore) !== 0)
       ? [...state.history, { round: state.round, scores: state.players.map((p) => asNumber(p.roundScore)) }]
       : state.history;
@@ -203,7 +236,7 @@ export function GameProvider({ children }) {
     }
     // Push immediately so viewers see the final result without waiting for the debounce.
     roomSync.pushSync(next).catch(() => {});
-  }, [state, updateState, roomSync]);
+  }, [updateState, roomSync]);
 
   const value = useMemo(() => ({
     state,
@@ -216,9 +249,10 @@ export function GameProvider({ children }) {
     nextRound,
     endSession,
     setPlayerColor,
+    setPlayerAvatar,
     getRoundTotal: () => getRoundTotal(state),
     ...roomSync,
-  }), [applyRemain, endSession, nextRound, resetRoundScore, roomSync, setPlayerColor, setPlayers, startSession, state, tapPlayer]);
+  }), [applyRemain, endSession, nextRound, resetRoundScore, roomSync, setPlayerColor, setPlayerAvatar, setPlayers, startSession, state, tapPlayer]);
 
   return <GameStateContext.Provider value={value}>{children}</GameStateContext.Provider>;
 }
